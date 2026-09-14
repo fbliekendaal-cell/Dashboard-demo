@@ -11,7 +11,11 @@ import logging
 from typing import Tuple, Union
 from helpers import get_numeric_clean, aggregate_by_groups
 
-
+try:
+    import statsmodels.api as sm  # noqa: F401
+    HAS_STATSMODELS = True
+except Exception:
+    HAS_STATSMODELS = False
 
 logger = logging.getLogger(__name__)
  
@@ -56,25 +60,17 @@ RUWE_WAARDEN = {
     'Leeftijd':                 'rec_age_current',
 }
 
-CORRELATIE_VARIABELEN = {
-    'Leefstijlscore':     'rec_ls_lifestyle_score',
-    'BMI (waarde)':       'rec_med_bmi',
-    'Heartrisk (score)':  'rec_heartrisk',
-    'Framingham score':   'rec_framingham_non_invasive',
-    'Stress (score)':     'rec_ls_stress_sum',
-    'DASS stress':        'rec_dass_stress_score',
-    'DASS angst':         'rec_dass_anxiety_score',
-    'DASS depressie':     'rec_dass_depression_score',
-    'Slaap PSQI':         'rec_ls_sleep_psqi_sum',
-    'Veerkracht':         'rec_resilience_score',
-    'Welzijn':            'rec_wellbeing_score',
-    'Werkvermogen (WAI)': 'rec_asr_wai_score',
-    'Leeftijd':           'rec_age_current',
-    'Fruit (stuks/dag)':  'rec_ls_nutrition_fruit_fruit_per_day',
-    'Groenten (gram/dag)': 'rec_ls_vegetables_gram_per_day',
-    'Alcohol (glazen/week)': 'rec_ls_alcohol_total_per_week',
-    'Natrium (mg/dag)':   'rec_ls_nutrition_natrium_per_day',
-    'Suiker (gram/dag)':  'rec_ls_nutrition_sugar_per_day',
+T_TOETS_EXTRA_VARIABELEN = {
+    'Framingham score':         'rec_framingham_non_invasive',
+    'Heartrisk (score)':        'rec_heartrisk',
+    'BMI (waarde)':             'rec_med_bmi',
+    'Werkdruk':                 'rec_asr_workload_score',
+    'Uitputting':               'rec_asr_exhaustion_score',
+    'Burn-out score':           'rec_asr_burn_out_score',
+    'Vitaliteit':               'rec_asr_vitality_score',
+    'Werktevredenheid':         'rec_asr_job_satisfaction_score',
+    'Stappen per dag':          'rec_ls_exercise_steps_per_day',
+    'Beweegminuten':            'rec_ls_exercise_physical_activity_minutes_total',
 }
 
 OUTLIER_GRENZEN = {
@@ -581,10 +577,7 @@ def maak_outlier_boxplot(df: pd.DataFrame, variabele_label: str,
 # ══════════════════════════════════════════════════════════════════════════════
 # 3. T-TOETS MANNEN VS VROUWEN
 # ══════════════════════════════════════════════════════════════════════════════
-def bereken_t_toetsen(
-    df: pd.DataFrame,
-    geselecteerde_variabelen: list[str] | tuple[str, ...] | None = None,
-) -> pd.DataFrame:
+def bereken_t_toetsen(df: pd.DataFrame, geselecteerde_variabelen: list[str] | None = None) -> pd.DataFrame:
     """
     Voert Welch t-toets uit voor alle continue variabelen,
     mannen vs vrouwen. Rapporteert t-statistiek, p-waarde en Cohen's d.
@@ -594,14 +587,12 @@ def bereken_t_toetsen(
     mannen  = df2[df2['geslacht'] == 1]
     vrouwen = df2[df2['geslacht'] == 0]
 
-    alle_kolommen = {**LEEFSTIJL_SCORES, **RUWE_WAARDEN}
-    if geselecteerde_variabelen is not None:
-        selectie = set(geselecteerde_variabelen)
-        alle_kolommen = {
-            label: kolom for label, kolom in alle_kolommen.items()
-            if label in selectie
-        }
+    alle_kolommen = {**LEEFSTIJL_SCORES, **RUWE_WAARDEN, **T_TOETS_EXTRA_VARIABELEN}
     rijen = []
+
+    if geselecteerde_variabelen:
+        geselecteerde_variabelen = set(geselecteerde_variabelen)
+        alle_kolommen = {label: kolom for label, kolom in alle_kolommen.items() if label in geselecteerde_variabelen}
 
     for label, kolom in alle_kolommen.items():
         if kolom not in df.columns:
@@ -639,77 +630,9 @@ def bereken_t_toetsen(
             'Effectgrootte':    effect,
         })
 
-    resultaat = pd.DataFrame(rijen)
-    if resultaat.empty:
-        return pd.DataFrame(columns=[
-            'Variabele', 'Gemiddelde man', 'Gemiddelde vrouw', 'Verschil',
-            'N man', 'N vrouw', 't-statistiek', 'p-waarde', 'Significant',
-            "Cohen's d", 'Effectgrootte',
-        ])
-    return resultaat.sort_values('p-waarde').reset_index(drop=True)
-
-
-def bereken_t_toets_organisatieonderdeel(
-    df: pd.DataFrame,
-    organisatiekolom: str,
-    organisatieonderdeel: str,
-    geselecteerde_variabelen: list[str] | tuple[str, ...] | None = None,
-) -> pd.DataFrame:
-    """Vergelijk een organisatieonderdeel met de overige geselecteerde populatie.
-
-    De vergelijkingsgroep is bewust het totaal exclusief het geselecteerde
-    onderdeel, zodat de twee groepen onafhankelijk zijn voor een Welch t-toets.
-    Dezelfde ondergrens van tien deelnemers per groep als de bestaande t-toets
-    man versus vrouw wordt gebruikt.
-    """
-    kolommen = {**LEEFSTIJL_SCORES, **RUWE_WAARDEN}
-    if geselecteerde_variabelen is not None:
-        selectie = set(geselecteerde_variabelen)
-        kolommen = {
-            label: kolom for label, kolom in kolommen.items()
-            if label in selectie
-        }
-
-    if organisatiekolom not in df.columns:
-        return pd.DataFrame()
-
-    onderdelen = df[organisatiekolom].fillna('Onbekend').astype(str).str.strip().replace('', 'Onbekend')
-    onderdeel = df[onderdelen.eq(organisatieonderdeel)]
-    overige = df[~onderdelen.eq(organisatieonderdeel)]
-    rijen = []
-
-    for label, kolom in kolommen.items():
-        if kolom not in df.columns:
-            continue
-        onderdeel_waarden = pd.to_numeric(onderdeel[kolom], errors='coerce').dropna()
-        overige_waarden = pd.to_numeric(overige[kolom], errors='coerce').dropna()
-        if len(onderdeel_waarden) < 10 or len(overige_waarden) < 10:
-            continue
-
-        t_stat, p_waarde = stats.ttest_ind(
-            onderdeel_waarden,
-            overige_waarden,
-            equal_var=False,
-        )
-        rijen.append({
-            'Variabele': label,
-            'Gemiddelde onderdeel': round(onderdeel_waarden.mean(), 2),
-            'Gemiddelde overige': round(overige_waarden.mean(), 2),
-            'Verschil': round(onderdeel_waarden.mean() - overige_waarden.mean(), 2),
-            'N onderdeel': len(onderdeel_waarden),
-            'N overige': len(overige_waarden),
-            't-statistiek': round(t_stat, 3),
-            'p-waarde': round(p_waarde, 4),
-            'Significant': 'Ja ✓' if p_waarde < 0.05 else 'Nee',
-        })
-
-    if not rijen:
-        return pd.DataFrame(columns=[
-            'Variabele', 'Gemiddelde onderdeel', 'Gemiddelde overige',
-            'Verschil', 'N onderdeel', 'N overige', 't-statistiek',
-            'p-waarde', 'Significant',
-        ])
-    return pd.DataFrame(rijen).sort_values('p-waarde').reset_index(drop=True)
+    return (pd.DataFrame(rijen)
+            .sort_values('p-waarde')
+            .reset_index(drop=True))
 
 
 def maak_t_toets_plot(df_toetsen: pd.DataFrame) -> go.Figure:
@@ -717,15 +640,6 @@ def maak_t_toets_plot(df_toetsen: pd.DataFrame) -> go.Figure:
     Forest plot van Cohen's d per variabele.
     Geeft visueel inzicht in richting en grootte van het verschil.
     """
-    if df_toetsen.empty:
-        fig = go.Figure()
-        fig.add_annotation(
-            text='Geen resultaten voor de geselecteerde variabelen.',
-            showarrow=False,
-            font=dict(size=14),
-        )
-        return fig
-
     df = df_toetsen.copy()
     df = df.sort_values("Cohen's d")
 
@@ -768,24 +682,84 @@ def maak_t_toets_plot(df_toetsen: pd.DataFrame) -> go.Figure:
     return fig
 
 
+def maak_t_toets_gemiddelden_plot(df_toetsen: pd.DataFrame) -> go.Figure:
+    """Vergelijk de gemiddelde scores van mannen en vrouwen per variabele."""
+    required = {'Variabele', 'Gemiddelde man', 'Gemiddelde vrouw'}
+    if df_toetsen is None or df_toetsen.empty or not required.issubset(df_toetsen.columns):
+        return go.Figure()
+
+    df = df_toetsen.sort_values('Verschil', ascending=True).copy()
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        name='Man',
+        y=df['Variabele'],
+        x=df['Gemiddelde man'],
+        orientation='h',
+        marker_color=GENDER_COLORS['Man'],
+        customdata=df[['N man']].to_numpy(),
+        hovertemplate='Man: %{x:.2f}<br>N: %{customdata[0]}<extra></extra>',
+    ))
+    fig.add_trace(go.Bar(
+        name='Vrouw',
+        y=df['Variabele'],
+        x=df['Gemiddelde vrouw'],
+        orientation='h',
+        marker_color=GENDER_COLORS['Vrouw'],
+        customdata=df[['N vrouw']].to_numpy(),
+        hovertemplate='Vrouw: %{x:.2f}<br>N: %{customdata[0]}<extra></extra>',
+    ))
+    fig.update_layout(
+        barmode='group',
+        title='Gemiddelde score per variabele: mannen vs vrouwen',
+        xaxis_title='Gemiddelde score',
+        yaxis_title='',
+        height=max(450, len(df) * 30),
+        legend_title_text='Geslacht',
+        margin=dict(l=180),
+    )
+    return fig
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # 4. CORRELATIEMATRIX
 # ══════════════════════════════════════════════════════════════════════════════
-def maak_correlatiematrix(
-    df: pd.DataFrame,
-    min_n: int = 200,
-    lang: str = 'nl',
-    geselecteerde_variabelen: list[str] | tuple[str, ...] | None = None,
-) -> go.Figure:
+def maak_correlatiematrix(df: pd.DataFrame,
+                           min_n: int = 200, lang: str = 'nl') -> go.Figure:
     """
-    Pearson correlatiematrix van leefstijlscores.
+    Pearson correlatiematrix van leefstijlscores en werkindicatoren.
     Alleen variabelen met voldoende data (min_n) worden meegenomen.
     """
+    kandidaat_kolommen = {
+        'Leefstijlscore':        'rec_ls_lifestyle_score',
+        'BMI (waarde)':          'rec_med_bmi',
+        'Heartrisk (score)':     'rec_heartrisk',
+        'Framingham score':      'rec_framingham_non_invasive',
+        'Stress (score)':        'rec_ls_stress_sum',
+        'DASS stress':           'rec_dass_stress_score',
+        'DASS angst':            'rec_dass_anxiety_score',
+        'DASS depressie':        'rec_dass_depression_score',
+        'Slaap PSQI':            'rec_ls_sleep_psqi_sum',
+        'Veerkracht':            'rec_resilience_score',
+        'Welzijn':               'rec_wellbeing_score',
+        'Werkvermogen (WAI)':    'rec_asr_wai_score',
+        'Werkdruk':              'rec_asr_workload_score',
+        'Uitputting':            'rec_asr_exhaustion_score',
+        'Burn-out score':        'rec_asr_burn_out_score',
+        'Vitaliteit':            'rec_asr_vitality_score',
+        'Werktevredenheid':      'rec_asr_job_satisfaction_score',
+        'Leeftijd':              'rec_age_current',
+        'Stappen per dag':       'rec_ls_exercise_steps_per_day',
+        'Beweegminuten':         'rec_ls_exercise_physical_activity_minutes_total',
+        'Fruit (stuks/dag)':     'rec_ls_nutrition_fruit_fruit_per_day',
+        'Groenten (gram/dag)':   'rec_ls_vegetables_gram_per_day',
+        'Vet (gram/dag)':        'rec_ls_nutrition_saturated_fat_per_day',
+        'Alcohol (glazen/week)': 'rec_ls_alcohol_total_per_week',
+        'Natrium (mg/dag)':      'rec_ls_nutrition_natrium_per_day',
+        'Suiker (gram/dag)':     'rec_ls_nutrition_sugar_per_day',
+    }
+
     kolommen = {}
-    selectie = set(geselecteerde_variabelen) if geselecteerde_variabelen is not None else None
-    for label, kolom in CORRELATIE_VARIABELEN.items():
-        if selectie is not None and label not in selectie:
-            continue
+    for label, kolom in kandidaat_kolommen.items():
         if kolom not in df.columns:
             continue
         s = pd.to_numeric(df[kolom], errors='coerce')
@@ -796,13 +770,24 @@ def maak_correlatiematrix(
     if len(kolommen) < 2:
         fig = go.Figure()
         fig.add_annotation(
-            text=tr('Selecteer minimaal twee variabelen met voldoende data.', lang),
+            text=tr('Onvoldoende variabelen met minimaal {min_n} deelnemers.', lang, min_n=min_n),
             showarrow=False,
-            font=dict(size=14),
+            font=dict(size=14, color='gray'),
         )
+        fig.update_layout(template='plotly_white', height=400)
         return fig
 
-    df_corr = pd.DataFrame(kolommen).corr(method='pearson')
+    df_corr = pd.DataFrame(kolommen).corr(method='pearson').dropna(how='all').dropna(how='all', axis=1)
+
+    if df_corr.empty or df_corr.shape[0] < 2:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=tr('Onvoldoende variatie voor correlatiematrix.', lang),
+            showarrow=False,
+            font=dict(size=14, color='gray'),
+        )
+        fig.update_layout(template='plotly_white', height=400)
+        return fig
 
     fig = px.imshow(
         df_corr,
@@ -810,7 +795,7 @@ def maak_correlatiematrix(
         zmin=-1, zmax=1,
         text_auto='.2f',
         aspect='auto',
-        title=tr('Pearson correlatiematrix — leefstijlvariabelen', lang),
+        title=tr('Pearson correlatiematrix — leefstijl- en werkindicatoren', lang),
     )
     fig.update_traces(textfont_size=11)
     aangepaste_annotations = []
@@ -832,36 +817,108 @@ def maak_correlatiematrix(
 def maak_scatter_correlatie(df: pd.DataFrame,
                              x_label: str, x_kolom: str,
                              y_label: str, y_kolom: str,
-                             geslacht_filter: str = 'beide') -> go.Figure:
+                             geslacht_filter: str = 'beide',
+                             lang: str = 'nl') -> go.Figure:
     """Scatterplot van twee variabelen met trendlijn en correlatie."""
+    if x_kolom not in df.columns or y_kolom not in df.columns:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=tr('Gekozen variabele(n) niet gevonden in data.', lang),
+            showarrow=False,
+            font=dict(size=14, color='gray'),
+        )
+        fig.update_layout(template='plotly_white', height=450)
+        return fig
+
     df2 = df.copy()
     df2['_x'] = pd.to_numeric(df2[x_kolom], errors='coerce')
     df2['_y'] = pd.to_numeric(df2[y_kolom], errors='coerce')
     df2 = df2.dropna(subset=['_x', '_y'])
 
-    r, p = stats.pearsonr(df2['_x'], df2['_y'])
+    if len(df2) < 3:
+        fig = go.Figure()
+        fig.add_annotation(
+            text=tr('Onvoldoende datapunten voor deze combinatie van variabelen.', lang),
+            showarrow=False,
+            font=dict(size=14, color='gray'),
+        )
+        fig.update_layout(template='plotly_white', height=450)
+        return fig
 
-    if geslacht_filter == 'beide':
+    x_std = float(df2['_x'].std(ddof=0))
+    y_std = float(df2['_y'].std(ddof=0))
+    if x_std > 0 and y_std > 0:
+        try:
+            r, p = stats.pearsonr(df2['_x'], df2['_y'])
+            title_text = f'{x_label} vs {y_label} (r = {r:.3f}, p = {p:.4f})'
+            has_trendline = True
+        except Exception:
+            title_text = f'{x_label} vs {y_label}'
+            has_trendline = False
+    else:
+        title_text = f'{x_label} vs {y_label} (geen spreiding)'
+        has_trendline = False
+
+    if geslacht_filter == 'beide' and 'rec_user_gender' in df2.columns:
         df2['geslacht'] = pd.to_numeric(df2['rec_user_gender'], errors='coerce').map(GENDER_LABELS)
         df2 = df2.dropna(subset=['geslacht'])
         kleur_map = {v: GENDER_COLORS[v] for v in GENDER_LABELS.values()}
-        fig = px.scatter(
-            df2, x='_x', y='_y',
-            color='geslacht', color_discrete_map=kleur_map,
-            opacity=0.4, trendline='ols',
-            labels={'_x': x_label, '_y': y_label, 'geslacht': 'Geslacht'},
-            title=f'{x_label} vs {y_label} (r = {r:.3f}, p = {p:.4f})',
-            category_orders={'geslacht': ['Man', 'Vrouw']},
-        )
-        fig.update_layout(legend_title_text='Geslacht')
+        try:
+            if has_trendline:
+                fig = px.scatter(
+                    df2, x='_x', y='_y',
+                    color='geslacht', color_discrete_map=kleur_map,
+                    opacity=0.5, trendline='ols',
+                    labels={'_x': x_label, '_y': y_label, 'geslacht': tr('Geslacht', lang)},
+                    title=title_text,
+                    category_orders={'geslacht': [GENDER_LABELS.get(1, 'Man'), GENDER_LABELS.get(0, 'Vrouw')]},
+                )
+            else:
+                fig = px.scatter(
+                    df2, x='_x', y='_y',
+                    color='geslacht', color_discrete_map=kleur_map,
+                    opacity=0.5,
+                    labels={'_x': x_label, '_y': y_label, 'geslacht': tr('Geslacht', lang)},
+                    title=title_text,
+                    category_orders={'geslacht': [GENDER_LABELS.get(1, 'Man'), GENDER_LABELS.get(0, 'Vrouw')]},
+                )
+        except Exception:
+            fig = px.scatter(
+                df2, x='_x', y='_y',
+                color='geslacht', color_discrete_map=kleur_map,
+                opacity=0.5,
+                labels={'_x': x_label, '_y': y_label, 'geslacht': tr('Geslacht', lang)},
+                title=title_text,
+            )
+        fig.update_layout(legend_title_text=tr('Geslacht', lang))
     else:
-        fig = px.scatter(
-            df2, x='_x', y='_y',
-            opacity=0.4, trendline='ols',
-            labels={'_x': x_label, '_y': y_label},
-            title=f'{x_label} vs {y_label} (r = {r:.3f}, p = {p:.4f})',
-        )
+        try:
+            if has_trendline:
+                fig = px.scatter(
+                    df2, x='_x', y='_y',
+                    opacity=0.5, trendline='ols',
+                    color_discrete_sequence=[HOOFD_KLEUR],
+                    labels={'_x': x_label, '_y': y_label},
+                    title=title_text,
+                )
+            else:
+                fig = px.scatter(
+                    df2, x='_x', y='_y',
+                    opacity=0.5,
+                    color_discrete_sequence=[HOOFD_KLEUR],
+                    labels={'_x': x_label, '_y': y_label},
+                    title=title_text,
+                )
+        except Exception:
+            fig = px.scatter(
+                df2, x='_x', y='_y',
+                opacity=0.5,
+                color_discrete_sequence=[HOOFD_KLEUR],
+                labels={'_x': x_label, '_y': y_label},
+                title=title_text,
+            )
 
+    fig.update_layout(template='plotly_white', height=500)
     return fig
 
 
@@ -1914,8 +1971,22 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
             return pd.DataFrame(), {}
 
         engine = create_engine(effective_db_url)
-        bridge = pd.read_sql(
-            text("""
+        is_sqlite = 'sqlite' in str(effective_db_url).lower()
+        
+        if is_sqlite:
+            bridge_query = """
+                SELECT
+                    p.id AS participant_id,
+                    m.user_id,
+                    NULL AS user_name,
+                    NULL AS first_name,
+                    NULL AS last_name
+                FROM participants p
+                LEFT JOIN my_clic_participants m
+                    ON m.qe_participant_id = p.public_id
+            """
+        else:
+            bridge_query = """
                 SELECT
                     p.id AS participant_id,
                     m.user_id,
@@ -1931,9 +2002,20 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
                     ON a.model_type = 'user'
                    AND a.model_id = m.user_id
                    AND a.deleted_at IS NULL
-            """),
-            engine,
-        )
+            """
+        try:
+            bridge = pd.read_sql(text(bridge_query), engine)
+        except Exception:
+            # Fallback simple table query
+            bridge = pd.read_sql(
+                text("""
+                    SELECT p.id AS participant_id, m.user_id, NULL AS user_name, NULL AS first_name, NULL AS last_name
+                    FROM participants p
+                    LEFT JOIN my_clic_participants m ON m.qe_participant_id = p.public_id
+                """),
+                engine,
+            )
+
         if participant_ids is not None:
             pids = set(pd.to_numeric(pd.Series(list(participant_ids)), errors='coerce').dropna().astype(int))
             bridge = bridge[pd.to_numeric(bridge['participant_id'], errors='coerce').isin(pids)]
@@ -1973,11 +2055,42 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
         df['has_gestart'] = df['participant_id'].isin(comp_ids)
         df['has_scores'] = pd.to_numeric(df.get('rec_ls_lifestyle_score'), errors='coerce').notna()
 
-        # Sequentiele funnel in productvolgorde (monotoon dalend)
+        # Herhaalde invulling / andere vragenlijst, op basis van completions.
+        herhaal_ids = set()
+        andere_vl_ids = set()
+        if not df_comp.empty:
+            df_comp_num = df_comp.copy()
+            df_comp_num['participant_id'] = pd.to_numeric(df_comp_num['participant_id'], errors='coerce')
+            df_comp_num['questionnaire_id'] = pd.to_numeric(df_comp_num['questionnaire_id'], errors='coerce')
+            df_comp_num = df_comp_num.dropna(subset=['participant_id', 'questionnaire_id'])
+
+            if participant_ids is not None:
+                pids = set(pd.to_numeric(pd.Series(list(participant_ids)), errors='coerce').dropna().astype(int))
+                df_comp_num = df_comp_num[df_comp_num['participant_id'].isin(pids)]
+
+            # Dezelfde vragenlijst >1x ingevuld (zelfde patroon als haal_vragenlijsten_overzicht).
+            herhaal = (
+                df_comp_num.groupby(['participant_id', 'questionnaire_id'])
+                .size()
+                .reset_index(name='n')
+            )
+            herhaal_ids = set(herhaal.loc[herhaal['n'] > 1, 'participant_id'].astype(int))
+
+            # Meer dan 1 unieke vragenlijst ingevuld.
+            n_unieke_vl = df_comp_num.groupby('participant_id')['questionnaire_id'].nunique()
+            andere_vl_ids = set(n_unieke_vl[n_unieke_vl > 1].index.astype(int))
+
+        df['has_herhaald'] = df['participant_id'].isin(herhaal_ids)
+        df['has_andere_vl'] = df['participant_id'].isin(andere_vl_ids)
+
+        # Sequentiele funnel in productvolgorde (monotoon dalend) voor basisfunnel,
+        # gevolgd door twee parallelle vervolgmetrieken binnen de groep met scores.
         df['step_leeftijd'] = df['has_leeftijd']
         df['step_geslacht'] = df['step_leeftijd'] & df['has_geslacht']
         df['step_gestart'] = df['step_geslacht'] & df['has_gestart']
         df['step_scores'] = df['step_gestart'] & df['has_scores']
+        df['step_herhaald'] = df['step_scores'] & df['has_herhaald']
+        df['step_andere_vl'] = df['step_scores'] & df['has_andere_vl']
 
         stage_flags = {
             'geregistreerd': pd.Series(True, index=df.index),
@@ -1985,6 +2098,8 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
             'geslacht': df['step_geslacht'],
             'vragenlijst_gestart': df['step_gestart'],
             'scores_beschikbaar': df['step_scores'],
+            'andere_vl_parallel': df['step_andere_vl'],
+            'herhaald_parallel': df['step_herhaald'],
         }
 
         stage_labels = {
@@ -1993,23 +2108,32 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
             'geslacht': 'Geslacht ingevuld',
             'vragenlijst_gestart': 'Vragenlijst gestart',
             'scores_beschikbaar': 'Scores beschikbaar',
+            'andere_vl_parallel': 'Andere vragenlijst ingevuld',
+            'herhaald_parallel': 'Vragenlijst opnieuw ingevuld',
         }
 
         n_start = int(stage_flags['geregistreerd'].sum())
+        n_scores_totaal = int(stage_flags['scores_beschikbaar'].sum())
         rows = []
         prev_n = n_start
         for key, label in stage_labels.items():
             n = int(stage_flags[key].sum())
-            dropoff = prev_n - n if key != 'geregistreerd' else 0
+            if key in ('herhaald_parallel', 'andere_vl_parallel'):
+                ref_n = n_scores_totaal
+            else:
+                ref_n = prev_n
+
+            dropoff = ref_n - n if key != 'geregistreerd' else 0
             rows.append({
                 'stap': label,
                 'stap_key': key,
                 'aantal': n,
                 'pct_van_start': round(n / max(n_start, 1) * 100, 1),
                 'afgevallen_sinds_vorige': max(dropoff, 0),
-                'pct_afgevallen_sinds_vorige': round(max(dropoff, 0) / max(prev_n, 1) * 100, 1) if key != 'geregistreerd' else 0.0,
+                'pct_afgevallen_sinds_vorige': round(max(dropoff, 0) / max(ref_n, 1) * 100, 1) if key != 'geregistreerd' else 0.0,
             })
-            prev_n = n
+            if key not in ('herhaald_parallel', 'andere_vl_parallel'):
+                prev_n = n
 
         funnel_df = pd.DataFrame(rows)
 
@@ -2031,12 +2155,18 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
             }]),
         ], ignore_index=True)
 
+        n_herhaald_binnen_scores = int(stage_flags['herhaald_parallel'].sum())
+        n_andere_vl_binnen_scores = int(stage_flags['andere_vl_parallel'].sum())
+
         meta = {
             'totaal_geregistreerd': n_start,
             'naam_bron': 'users.name + smart_health.addresses',
             'naam_totaal': n_naam_totaal,
             'naam_na_leeftijd': n_naam_na_leeftijd,
             'koppeling_bridge': int(df['user_id'].notna().sum()),
+            'scores_totaal': n_scores_totaal,
+            'herhaald_totaal': n_herhaald_binnen_scores,
+            'andere_vl_totaal': n_andere_vl_binnen_scores,
         }
         return funnel_df, meta
     except Exception as e:

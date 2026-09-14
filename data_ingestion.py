@@ -4,12 +4,44 @@ from sqlalchemy import create_engine, text, inspect
 from pathlib import Path
 import logging
 import sys # Keep sys import as it's used for path manipulation in some contexts
-from config import DB_URL, DB_URL_POSTGRES, DB_URL_SMART_HEALTH
+from config import DB_URL, DB_URL_POSTGRES, DB_URL_SMART_HEALTH, CSV_DATA_DIR, DATA_SOURCE
+from account_filtering import filter_interne_accounts
 # Lokale instellingen
 CODE_DIR = Path(__file__).resolve().parent
 
 # All data should be loaded directly from database, not from local parquet files
 # This ensures data is always current and no local storage is needed
+
+
+def _derive_bmi_category(series: pd.Series) -> pd.Series:
+    """Derive the five BMI bands used by latest_scores."""
+    bmi = pd.to_numeric(series, errors='coerce')
+    return pd.Series(
+        np.select(
+            [bmi >= 30, bmi >= 25, bmi >= 18.5, bmi >= 16],
+            [2, 1, 0, -1],
+            default=-2,
+        ),
+        index=series.index,
+    ).where(bmi.notna())
+
+
+def _derive_stress_category(series: pd.Series) -> pd.Series:
+    """Derive stress bands from the 0-28 source scale."""
+    stress = pd.to_numeric(series, errors='coerce')
+    return pd.Series(
+        np.select([stress >= 16, stress >= 11], [2, 1], default=0),
+        index=series.index,
+    ).where(stress.notna())
+
+
+def _derive_sleep_category(series: pd.Series) -> pd.Series:
+    """Derive PSQI bands used by latest_scores: 0-6, 7-14, 15-20."""
+    sleep = pd.to_numeric(series, errors='coerce')
+    return pd.Series(
+        np.select([sleep > 14, sleep > 6], [2, 1], default=0),
+        index=series.index,
+    ).where(sleep.notna())
 
 
 def _normalize_lifestyle_component_to_1_10(series: pd.Series) -> pd.Series:
@@ -56,6 +88,17 @@ def _load_table_from_database_always(table_name: str, code_dir: Path) -> pd.Data
 
 def load_table_from_database(table_name: str, db_url: str) -> pd.DataFrame:
     """Laadt een tabel direct uit de database, accepteert een URL of een engine."""
+    if DATA_SOURCE == 'csv':
+        csv_path = CSV_DATA_DIR / f'{table_name}.csv'
+        try:
+            return pd.read_csv(csv_path)
+        except FileNotFoundError:
+            logging.warning("CSV-tabel ontbreekt: %s", csv_path)
+            return pd.DataFrame()
+        except Exception as exc:
+            logging.warning("Fout bij laden van CSV-tabel '%s': %s", table_name, exc)
+            return pd.DataFrame()
+
     engine = None
     if isinstance(db_url, str):
         if not db_url:
@@ -212,12 +255,35 @@ def generate_consolidated_scores_in_db(db_url: str) -> tuple[bool, str]: # Chang
 
         if 'rec_med_bmi_cat' in df_consolidated.columns and df_consolidated['rec_med_bmi_cat'].isna().all():
             if 'rec_med_bmi' in df_consolidated.columns:
-                bmi = pd.to_numeric(df_consolidated['rec_med_bmi'], errors='coerce')
-                df_consolidated['rec_med_bmi_cat'] = np.select(
-                    [bmi >= 30, bmi >= 25, bmi >= 18.5, bmi < 18.5],
-                    [2, 1, 0, -1],
-                    default=0
+                df_consolidated['rec_med_bmi_cat'] = _derive_bmi_category(df_consolidated['rec_med_bmi'])
+
+        if 'rec_ls_exercise_steps_cat' not in df_consolidated.columns or df_consolidated['rec_ls_exercise_steps_cat'].isna().all():
+            if 'rec_ls_exercise_steps_per_day' in df_consolidated.columns:
+                steps = pd.to_numeric(df_consolidated['rec_ls_exercise_steps_per_day'], errors='coerce')
+                df_consolidated['rec_ls_exercise_steps_cat'] = np.where(steps >= 10000, 2, np.where(steps >= 5000, 1, 0))
+
+        if 'rec_ls_sleep_psqi_amount_of_hours_slept_text' not in df_consolidated.columns or df_consolidated['rec_ls_sleep_psqi_amount_of_hours_slept_text'].isna().all():
+            if 'rec_ls_sleep_psqi_sum' in df_consolidated.columns:
+                psqi = pd.to_numeric(df_consolidated['rec_ls_sleep_psqi_sum'], errors='coerce')
+                df_consolidated['rec_ls_sleep_psqi_amount_of_hours_slept_text'] = np.select(
+                    [psqi <= 5, psqi <= 8, psqi <= 12],
+                    ['7-9 uur', '6-7 uur', '9-10 uur'],
+                    default='Minder dan 6 uur'
                 )
+
+        if 'rec_ls_stress_type_1_worry' not in df_consolidated.columns or df_consolidated['rec_ls_stress_type_1_worry'].isna().all():
+            if 'rec_ls_stress_sum' in df_consolidated.columns:
+                stress = pd.to_numeric(df_consolidated['rec_ls_stress_sum'], errors='coerce')
+                df_consolidated['rec_ls_stress_type_1_worry'] = np.where(stress >= 7.0, 2, np.where(stress >= 4.0, 1, 0))
+
+        if 'rec_ls_stress_type_2_tense' not in df_consolidated.columns or df_consolidated['rec_ls_stress_type_2_tense'].isna().all():
+            if 'rec_ls_stress_sum' in df_consolidated.columns:
+                stress = pd.to_numeric(df_consolidated['rec_ls_stress_sum'], errors='coerce')
+                df_consolidated['rec_ls_stress_type_2_tense'] = np.where(stress >= 6.5, 2, np.where(stress >= 3.5, 1, 0))
+
+        if 'rec_framingham_non_invasive' not in df_consolidated.columns or df_consolidated['rec_framingham_non_invasive'].isna().all():
+            if 'rec_heartrisk' in df_consolidated.columns:
+                df_consolidated['rec_framingham_non_invasive'] = pd.to_numeric(df_consolidated['rec_heartrisk'], errors='coerce')
 
         # 7. Voeg laatste invuldatum toe
         if not df_completions.empty:
@@ -415,28 +481,32 @@ LATEST_SCORE_SLUGS = sorted({
 def _load_latest_scores_wide(db_url: str) -> pd.DataFrame:
     """Laad geselecteerde latest_scores slugs in wide format op participant_id."""
     try:
+        if DATA_SOURCE == 'csv':
+            df_latest = load_table_from_database('latest_scores', db_url)
+            if df_latest.empty:
+                return pd.DataFrame(columns=['participant_id'])
+            df_latest = df_latest[df_latest['slug'].astype(str).str.startswith(('rec_', 'feat_'))].copy()
+            df_latest['dashboard_col'] = df_latest['slug'].map(_score_slug_to_dashboard_column)
+            df_latest = df_latest.dropna(subset=['participant_id', 'dashboard_col'])
+            df_wide = df_latest.pivot_table(
+                index='participant_id', columns='dashboard_col', values='value', aggfunc='first'
+            ).reset_index()
+            df_wide.columns.name = None
+            return df_wide
+
         engine = create_engine(db_url) if isinstance(db_url, str) else db_url
-        legacy_slugs = list(_get_slug_to_dashboard_mapping().keys())
-        if isinstance(db_url, str) and "sqlite" in db_url:
-            placeholders = ", ".join([f":slug_{i}" for i in range(len(legacy_slugs))])
-            query = text(f"""
-                SELECT participant_id, slug, value
-                FROM latest_scores
-                WHERE slug LIKE 'rec_%'
-                   OR slug LIKE 'feat_%'
-                   OR slug IN ({placeholders})
-            """)
-            params = {f"slug_{i}": slug for i, slug in enumerate(legacy_slugs)}
-        else:
-            query = text("""
-                SELECT participant_id, slug, value
-                FROM latest_scores
-                WHERE slug LIKE 'rec_%'
-                   OR slug LIKE 'feat_%'
-                   OR slug = ANY(:legacy_slugs)
-            """)
-            params = {'legacy_slugs': legacy_slugs}
-        df_latest = pd.read_sql(query, engine, params=params)
+        query = text("""
+            SELECT participant_id, slug, value
+            FROM latest_scores
+            WHERE slug LIKE 'rec_%'
+               OR slug LIKE 'feat_%'
+               OR slug = ANY(:legacy_slugs)
+        """)
+        df_latest = pd.read_sql(
+            query,
+            engine,
+            params={'legacy_slugs': list(_get_slug_to_dashboard_mapping().keys())},
+        )
         if df_latest.empty:
             return pd.DataFrame(columns=['participant_id'])
         df_latest = df_latest.dropna(subset=['participant_id', 'slug'])
@@ -553,45 +623,29 @@ def get_user_purchases(base_pad=None, db_url: str = DB_URL) -> pd.DataFrame:
     if db_url:
         try:
             engine = create_engine(db_url)
-            is_sqlite = 'sqlite' in str(db_url)
-            if is_sqlite:
-                query = text("""
-                    SELECT
-                        m.user_id AS participant_id,
-                        o.user_id,
-                        o.status,
-                        o.created_at,
-                        pr.name
-                    FROM orders o
-                    LEFT JOIN products pr
-                        ON CAST(pr.id AS TEXT) = CAST(o.product_id AS TEXT)
-                    LEFT JOIN my_clic_participants m
-                        ON m.user_id = o.user_id
-                """)
-            else:
-                query = text("""
-                    WITH participant_map AS (
-                        SELECT DISTINCT ON (m.user_id)
-                            m.user_id,
-                            p.id AS participant_id
-                        FROM my_clic_participants m
-                        JOIN participants p
-                            ON p.public_id = m.qe_participant_id
-                        WHERE m.user_id IS NOT NULL
-                        ORDER BY m.user_id, p.id DESC
-                    )
-                    SELECT
-                        pm.participant_id,
-                        o.user_id,
-                        o.status,
-                        o.created_at,
-                        pr.name
-                    FROM orders o
-                    LEFT JOIN products pr
-                        ON pr.id::text = o.product_id::text
-                    LEFT JOIN participant_map pm
-                        ON pm.user_id = o.user_id
-                """)
+            query = text("""
+                WITH participant_map AS (
+                    SELECT DISTINCT ON (m.user_id)
+                        m.user_id,
+                        p.id AS participant_id
+                    FROM smart_health.my_clic_participants m
+                    JOIN public.participants p
+                        ON p.public_id = m.qe_participant_id
+                    WHERE m.user_id IS NOT NULL
+                    ORDER BY m.user_id, p.id DESC
+                )
+                SELECT
+                    pm.participant_id,
+                    o.user_id,
+                    o.status,
+                    o.created_at,
+                    pr.name
+                FROM public.orders o
+                LEFT JOIN public.products pr
+                    ON pr.id::text = o.product_id::text
+                LEFT JOIN participant_map pm
+                    ON pm.user_id = o.user_id
+            """)
             df_purchases = pd.read_sql(query, engine)
             if not df_purchases.empty:
                 return df_purchases[['participant_id', 'user_id', 'status', 'created_at', 'name']]
@@ -630,21 +684,27 @@ def get_user_purchases(base_pad=None, db_url: str = DB_URL) -> pd.DataFrame:
     return df_purchases[['participant_id', 'user_id', 'status', 'created_at', 'name']]
 
 def add_app_user_ids_and_addresses(df: pd.DataFrame, db_url: str | None = None) -> pd.DataFrame:
+    # TIP: Hier kun je ook de logica toevoegen om 'users_met_scores.parquet' 
+    # opnieuw te genereren door de verschillende tabellen hier alvast te joinen.
+    # Dat ontlast de dashboard-code aanzienlijk.
+
     effective_db_url = db_url or DB_URL
 
+    # Load the canonical app addresses table. public.addresses can be a headerless
+    # imported copy, while smart_health.addresses has the expected column names.
     try:
         engine = create_engine(effective_db_url)
         df_addresses = pd.read_sql(
             text("""
                 SELECT model_id AS app_user_id, lat, long, city, country, postal_code, updated_at
-                FROM addresses
-                WHERE (model_type = 'user' OR model_type IS NULL)
+                FROM smart_health.addresses
+                WHERE model_type = 'user'
                   AND deleted_at IS NULL
             """),
             engine,
         )
     except Exception as e:
-        logging.warning(f"Could not load addresses, falling back to load_table_from_database: {e}")
+        logging.warning(f"Could not load smart_health.addresses, falling back to addresses table: {e}")
         df_addresses = load_table_from_database("addresses", effective_db_url)
 
     if df_addresses.empty:
@@ -682,29 +742,55 @@ def add_app_user_ids_and_addresses(df: pd.DataFrame, db_url: str | None = None) 
     if df['app_user_id'].isna().all() and ('public_id' in df.columns or 'participant_id' in df.columns):
         try:
             engine = create_engine(effective_db_url)
+            is_sqlite = 'sqlite' in str(effective_db_url).lower()
             if 'public_id' in df.columns:
-                participant_bridge = pd.read_sql(
-                    text("""
-                        SELECT qe_participant_id AS public_id, user_id AS app_user_id
-                        FROM smart_health.my_clic_participants
-                        WHERE user_id IS NOT NULL
-                    """),
-                    engine,
-                )
+                table_name = "my_clic_participants" if is_sqlite else "smart_health.my_clic_participants"
+                try:
+                    participant_bridge = pd.read_sql(
+                        text(f"""
+                            SELECT qe_participant_id AS public_id, user_id AS app_user_id
+                            FROM {table_name}
+                            WHERE user_id IS NOT NULL
+                        """),
+                        engine,
+                    )
+                except Exception:
+                    participant_bridge = pd.read_sql(
+                        text("""
+                            SELECT qe_participant_id AS public_id, user_id AS app_user_id
+                            FROM my_clic_participants
+                            WHERE user_id IS NOT NULL
+                        """),
+                        engine,
+                    )
                 df['public_id'] = df['public_id'].astype(str)
                 participant_bridge['public_id'] = participant_bridge['public_id'].astype(str)
                 merge_key = 'public_id'
             else:
-                participant_bridge = pd.read_sql(
-                    text("""
-                        SELECT p.id AS participant_id, m.user_id AS app_user_id
-                        FROM public.participants p
-                        JOIN smart_health.my_clic_participants m
-                            ON m.qe_participant_id = p.public_id
-                        WHERE m.user_id IS NOT NULL
-                    """),
-                    engine,
-                )
+                p_table = "participants" if is_sqlite else "public.participants"
+                m_table = "my_clic_participants" if is_sqlite else "smart_health.my_clic_participants"
+                try:
+                    participant_bridge = pd.read_sql(
+                        text(f"""
+                            SELECT p.id AS participant_id, m.user_id AS app_user_id
+                            FROM {p_table} p
+                            JOIN {m_table} m
+                                ON m.qe_participant_id = p.public_id
+                            WHERE m.user_id IS NOT NULL
+                        """),
+                        engine,
+                    )
+                except Exception:
+                    participant_bridge = pd.read_sql(
+                        text("""
+                            SELECT p.id AS participant_id, m.user_id AS app_user_id
+                            FROM participants p
+                            JOIN my_clic_participants m
+                                ON m.qe_participant_id = p.public_id
+                            WHERE m.user_id IS NOT NULL
+                        """),
+                        engine,
+                    )
                 df['participant_id'] = pd.to_numeric(df['participant_id'], errors='coerce')
                 participant_bridge['participant_id'] = pd.to_numeric(participant_bridge['participant_id'], errors='coerce')
                 merge_key = 'participant_id'
@@ -886,21 +972,15 @@ def load_participants_with_factor_scores(db_url: str) -> pd.DataFrame:
                     df_wide = df_wide.drop(columns=['store_id_linked'])
         
         # Add derived categories if needed
-        if 'rec_med_bmi' in df_wide.columns:
-            bmi = pd.to_numeric(df_wide['rec_med_bmi'], errors='coerce')
-            df_wide['rec_med_bmi_cat'] = np.select(
-                [bmi >= 30, bmi >= 25, bmi >= 18.5],
-                [2, 1, 0],
-                default=-1
-            )
+        if 'rec_med_bmi' in df_wide.columns and (
+            'rec_med_bmi_cat' not in df_wide.columns or df_wide['rec_med_bmi_cat'].isna().all()
+        ):
+            df_wide['rec_med_bmi_cat'] = _derive_bmi_category(df_wide['rec_med_bmi'])
         
-        if 'rec_ls_stress_sum' in df_wide.columns:
-            stress = pd.to_numeric(df_wide['rec_ls_stress_sum'], errors='coerce')
-            df_wide['rec_ls_stress_cat'] = np.select(
-                [stress >= 40, stress >= 20],
-                [2, 1],
-                default=0
-            )
+        if 'rec_ls_stress_sum' in df_wide.columns and (
+            'rec_ls_stress_cat' not in df_wide.columns or df_wide['rec_ls_stress_cat'].isna().all()
+        ):
+            df_wide['rec_ls_stress_cat'] = _derive_stress_category(df_wide['rec_ls_stress_sum'])
 
         # Voeg ontbrekende afgeleide kolommen toe voor visualisaties
         if 'rec_heartrisk' in df_wide.columns and ('rec_heartrisk_cat' not in df_wide.columns or df_wide['rec_heartrisk_cat'].isna().all()):
@@ -908,8 +988,7 @@ def load_participants_with_factor_scores(db_url: str) -> pd.DataFrame:
             df_wide['rec_heartrisk_cat'] = np.where(hr >= 20, 2, np.where(hr >= 10, 1, 0))
 
         if 'rec_ls_sleep_psqi_sum' in df_wide.columns and ('rec_ls_sleep_cat' not in df_wide.columns or df_wide['rec_ls_sleep_cat'].isna().all()):
-            sleep = pd.to_numeric(df_wide['rec_ls_sleep_psqi_sum'], errors='coerce')
-            df_wide['rec_ls_sleep_cat'] = np.select([sleep > 10, sleep > 5], [2, 1], default=0)
+            df_wide['rec_ls_sleep_cat'] = _derive_sleep_category(df_wide['rec_ls_sleep_psqi_sum'])
             
         if 'rec_age_current' in df_wide.columns and ('rec_med_age_cat' not in df_wide.columns or df_wide['rec_med_age_cat'].isna().all()):
             age = pd.to_numeric(df_wide['rec_age_current'], errors='coerce')

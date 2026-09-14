@@ -6,6 +6,7 @@ logs/
 *.parquet
 Tabellen/*.parquet
 *.csv
+!data/*.csv
 *.sqlmodels/
 models/
 __pycache__/

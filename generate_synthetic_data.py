@@ -24,22 +24,32 @@ DEFAULT_NUM_USERS = 300
 np.random.seed(DEFAULT_SEED)
 random.seed(DEFAULT_SEED)
 
-# Nederlandse steden en PC3/PC4 postcodes met GPS coördinaten
+# Nederlandse steden en 2-cijferige prefixen voor correcte 4-cijferige postcodes
 NL_CITIES = [
-    {"city": "Amsterdam", "pc_prefix": "101", "lat": 52.3676, "long": 4.9041},
-    {"city": "Utrecht", "pc_prefix": "351", "lat": 52.0907, "long": 5.1214},
-    {"city": "Rotterdam", "pc_prefix": "301", "lat": 51.9244, "long": 4.4777},
-    {"city": "Den Haag", "pc_prefix": "251", "lat": 52.0705, "long": 4.3007},
-    {"city": "Eindhoven", "pc_prefix": "561", "lat": 51.4416, "long": 5.4697},
-    {"city": "Groningen", "pc_prefix": "971", "lat": 53.2194, "long": 6.5665},
-    {"city": "Tilburg", "pc_prefix": "501", "lat": 51.5606, "long": 5.0919},
-    {"city": "Almere", "pc_prefix": "131", "lat": 52.3508, "long": 5.2647},
-    {"city": "Breda", "pc_prefix": "481", "lat": 51.5896, "long": 4.7760},
-    {"city": "Nijmegen", "pc_prefix": "651", "lat": 51.8449, "long": 5.8494},
-    {"city": "Venlo", "pc_prefix": "591", "lat": 51.3700, "long": 6.1724},
-    {"city": "Amersfoort", "pc_prefix": "381", "lat": 52.1561, "long": 5.3878},
-    {"city": "Leusden", "pc_prefix": "383", "lat": 52.1319, "long": 5.4294},
-    {"city": "Roermond", "pc_prefix": "604", "lat": 51.1942, "long": 5.9875},
+    {"city": "Amsterdam", "pc_prefix": "10", "lat": 52.3676, "long": 4.9041},
+    {"city": "Utrecht", "pc_prefix": "35", "lat": 52.0907, "long": 5.1214},
+    {"city": "Rotterdam", "pc_prefix": "30", "lat": 51.9244, "long": 4.4777},
+    {"city": "Den Haag", "pc_prefix": "25", "lat": 52.0705, "long": 4.3007},
+    {"city": "Eindhoven", "pc_prefix": "56", "lat": 51.4416, "long": 5.4697},
+    {"city": "Groningen", "pc_prefix": "97", "lat": 53.2194, "long": 6.5665},
+    {"city": "Tilburg", "pc_prefix": "50", "lat": 51.5606, "long": 5.0919},
+    {"city": "Almere", "pc_prefix": "13", "lat": 52.3508, "long": 5.2647},
+    {"city": "Breda", "pc_prefix": "48", "lat": 51.5896, "long": 4.7760},
+    {"city": "Nijmegen", "pc_prefix": "65", "lat": 51.8449, "long": 5.8494},
+    {"city": "Venlo", "pc_prefix": "59", "lat": 51.3700, "long": 6.1724},
+    {"city": "Amersfoort", "pc_prefix": "38", "lat": 52.1561, "long": 5.3878},
+    {"city": "Leusden", "pc_prefix": "38", "lat": 52.1319, "long": 5.4294},
+    {"city": "Roermond", "pc_prefix": "60", "lat": 51.1942, "long": 5.9875},
+]
+
+# Internationale steden voor representatieve internationale vergelijking (~15%)
+FOREIGN_CITIES = [
+    {"city": "Antwerpen", "country": "België", "postal_code": "2000", "lat": 51.2194, "long": 4.4025},
+    {"city": "Brussel", "country": "België", "postal_code": "1000", "lat": 50.8503, "long": 4.3517},
+    {"city": "Gent", "country": "België", "postal_code": "9000", "lat": 51.0543, "long": 3.7174},
+    {"city": "Düsseldorf", "country": "Duitsland", "postal_code": "40213", "lat": 51.2277, "long": 6.7735},
+    {"city": "Köln", "country": "Duitsland", "postal_code": "50667", "lat": 50.9375, "long": 6.9603},
+    {"city": "London", "country": "Verenigd Koninkrijk", "postal_code": "SW1A 1AA", "lat": 51.5074, "long": -0.1278},
 ]
 
 STORES_INFO = [
@@ -186,11 +196,19 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
         p_id = u_id
         store = random.choice(STORES_INFO)
         store_id = store["id"]
-        city_info = random.choice(NL_CITIES)
-        
+
+        is_foreign = random.random() < 0.15
+        if is_foreign:
+            city_info = random.choice(FOREIGN_CITIES)
+            country = city_info["country"]
+            pc = city_info["postal_code"]
+        else:
+            city_info = random.choice(NL_CITIES)
+            country = "Nederland"
+            pc = f"{city_info['pc_prefix']}{random.randint(10, 99)} {random.choice(['AB', 'CD', 'EF', 'GH', 'JK', 'LM', 'NP', 'RS', 'TV', 'XZ'])}"
+
         gender = random.choice([0, 1])  # 0=female, 1=male
         age = int(np.clip(np.random.normal(41, 11), 20, 67))
-        pc = f"{city_info['pc_prefix']}{random.randint(10, 99)} {random.choice(['AB', 'CD', 'EF', 'GH', 'JK', 'LM', 'NP', 'RS', 'TV', 'XZ'])}"
 
         user_created = start_date + timedelta(days=random.randint(0, 1800))
         user_created_str = user_created.strftime("%Y-%m-%d %H:%M:%S")
@@ -426,6 +444,11 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
             "rec_asr_exhaustion_score": exhaustion,
             "rec_med_diabetes_cat": diabetes_cat,
             "rec_med_blood_pressure_cat": blood_pressure_cat,
+            "rec_framingham_non_invasive": heartrisk,
+            "rec_ls_exercise_steps_cat": 2 if steps >= 10000 else (1 if steps >= 5000 else 0),
+            "rec_ls_sleep_psqi_amount_of_hours_slept_text": "7-9 uur" if 7 <= 8.5 - 0.2 * psqi <= 9 else ("6-7 uur" if psqi <= 8 else ("9-10 uur" if psqi <= 11 else "Minder dan 6 uur")),
+            "rec_ls_stress_type_1_worry": 2 if stress_sum >= 6.5 else (1 if stress_sum >= 3.5 else 0),
+            "rec_ls_stress_type_2_tense": 2 if stress_sum >= 6.0 else (1 if stress_sum >= 3.0 else 0),
         })
 
         user_accounts_data.append({
@@ -450,7 +473,7 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
             "lat": city_info["lat"] + np.random.normal(0, 0.03),
             "long": city_info["long"] + np.random.normal(0, 0.04),
             "city": city_info["city"],
-            "country": "Nederland",
+            "country": country,
             "postal_code": pc,
             "created_at": user_created_str,
             "updated_at": user_created_str,
@@ -541,6 +564,21 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
             "deleted_at": None,
         })
 
+    # Generate synthetic user_challenges table
+    challenges_data = []
+    for c_u_id in range(1, min(num_users, 150) + 1):
+        challenges_data.append({
+            "id": c_u_id,
+            "user_ref": c_u_id,
+            "challenge_id": random.choice([1, 2, 3, 4]),
+            "store_id": random.choice([1, 2, 3, 4, 5, 6]),
+            "status": random.choice(["completed", "active", "in_progress"]),
+            "weeks_completed": random.randint(1, 6),
+            "challenge_type": "lifestyle",
+            "created_at": "2024-01-01 00:00:00",
+            "updated_at": "2024-02-01 00:00:00",
+        })
+
     # Save to SQLite tables
     pd.DataFrame(QUESTIONNAIRES).to_sql("questionnaires", conn, if_exists="replace", index=False)
     pd.DataFrame(users_met_scores_data).to_sql("users_met_scores", conn, if_exists="replace", index=False)
@@ -556,6 +594,7 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
     pd.DataFrame(content_data).to_sql("content", conn, if_exists="replace", index=False)
     pd.DataFrame(content_translation_data).to_sql("content_translations", conn, if_exists="replace", index=False)
     pd.DataFrame(interactions_data).to_sql("interactions", conn, if_exists="replace", index=False)
+    pd.DataFrame(challenges_data).to_sql("user_challenges", conn, if_exists="replace", index=False)
 
     # 4. PRODUCTS & ORDERS
     df_products = pd.DataFrame(PRODUCTS)

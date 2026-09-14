@@ -86,6 +86,22 @@ def _get_allowed_usernames(config: dict) -> dict:
     return config.get("credentials", {}).get("usernames", {}) or {}
 
 
+def is_admin() -> bool:
+    """Return whether the current demo user has administrator access."""
+    try:
+        config = load_auth_config()
+        if not config.get("enabled", False):
+            return True
+        username = st.session_state.get("auth_user")
+        if not username:
+            return False
+        user = _get_allowed_usernames(config).get(username, {}) or {}
+        return str(user.get("role", "")).strip().lower() == "admin" or bool(user.get("admin", False))
+    except Exception:
+        auth_logger.warning("is_admin(): fout bij bepalen van rol", exc_info=True)
+        return False
+
+
 def _get_authenticator(config: dict) -> stauth.Authenticate:
     credentials = config.get("credentials", {})
     cookie = config.get("cookie", {})

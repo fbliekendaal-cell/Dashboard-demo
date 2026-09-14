@@ -1,7 +1,7 @@
 # Smart Health Dashboard (Tijdelijke Demo & Synthetische Data)
 
 Dit is een tijdelijke, veilige kopie van het Smart Health Dashboard voor demonstratie- en testdoeleinden aan eindgebruikers. 
-Alle gevoelige/productiedata is vervangen door realistische **synthetische data** in een lokale SQLite-database (`synthetic_health.db`).
+Alle gevoelige/productiedata is vervangen door realistische **synthetische data** in losse CSV-bestanden onder `data/`.
 
 ---
 
@@ -12,10 +12,10 @@ Alle gevoelige/productiedata is vervangen door realistische **synthetische data*
 cd /Users/bliekendaal/.gemini/antigravity/scratch/dashboard-demo
 ```
 
-### 2. Synthetische Database Genereren (Optioneel)
-De synthetische database is al gegenereerd en direct klaar voor gebruik (`synthetic_health.db`). Mocht je de data opnieuw willen genereren of uitbreiden:
+### 2. Synthetische Data Exporteren (Optioneel)
+De CSV-dataset staat al klaar in `data/`. Mocht je de data opnieuw willen genereren of uitbreiden:
 ```bash
-python3 generate_synthetic_data.py
+python3 export_synthetic_csv.py
 ```
 
 ### 3. Dashboard Lanceren
@@ -48,8 +48,9 @@ De gegenereerde database bevat 450+ geanonimiseerde deelnemers met:
 Instellingen zijn te beheren in het `.env` bestand:
 
 ```env
-# Database instelling (Standaard SQLite synthetische data)
-DATABASE_URL=sqlite:///synthetic_health.db
+# Databron (standaard: CSV, geen databaseverbinding nodig)
+DATA_SOURCE=csv
+CSV_DATA_DIR=data
 
 # Authenticatie in- of uitschakelen (false voor directe demo-toegang)
 SMART_HEALTH_AUTH_ENABLED=false
@@ -68,8 +69,8 @@ dashboard-demo/
 ├── visualisaties.py           # Plotly & Matplotlib grafieken logic
 ├── data_ingestion.py          # Data consolidatie & database ingesting
 ├── config.py                  # Centrale configuratie
-├── generate_synthetic_data.py # Synthetische data generator script
-├── synthetic_health.db        # Lokale SQLite database met synthetische data
+├── export_synthetic_csv.py    # Export van synthetische data naar CSV
+├── data/                      # CSV-tabellen voor de demo
 ├── .env                       # Omgevingsvariabelen
 ├── requirements.txt           # Python dependencies
 └── README.md                  # Documentatie

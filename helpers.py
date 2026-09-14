@@ -1,5 +1,41 @@
 import pandas as pd
 import numpy as np
+import re
+import unicodedata
+
+
+def normalize_search_text(value) -> str:
+    """Normalize searchable text for case- and accent-insensitive matching."""
+    if value is None:
+        return ''
+    text = unicodedata.normalize('NFKD', str(value))
+    text = ''.join(char for char in text if not unicodedata.combining(char))
+    text = re.sub(r'[_/.-]+', ' ', text.casefold())
+    return re.sub(r'\s+', ' ', text).strip()
+
+
+def search_variable_specs(specs, query):
+    """Return variable specs matching every term in the query.
+
+    Labels, descriptions, groups, column names and optional types are searched.
+    Results are ranked by label, then by the order in which specs were supplied.
+    """
+    terms = normalize_search_text(query).split()
+    if not terms:
+        return []
+
+    matches = []
+    for position, spec in enumerate(specs):
+        haystack = normalize_search_text(' '.join(
+            str(spec.get(field, ''))
+            for field in ('label', 'omschrijving', 'groep', 'kolom', 'type', 'eenheid')
+        ))
+        if all(term in haystack for term in terms):
+            label = normalize_search_text(spec.get('label', ''))
+            score = sum(term in label for term in terms)
+            matches.append((-score, position, spec))
+
+    return [spec for _, _, spec in sorted(matches)]
 
 def get_numeric_clean(df, kolom):
     """Zet een kolom om naar numeriek, vervangt 'None' door NaN."""

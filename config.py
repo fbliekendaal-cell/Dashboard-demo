@@ -17,16 +17,19 @@ CODE_DIR = Path(__file__).resolve().parent
 BASE = CODE_DIR.parent if os.getenv('IS_STREAMLIT') else CODE_DIR
 HTML_DIR = BASE / "HTML"
 TABLES_DIR = BASE / "Tabellen"
+DATA_DIR = CODE_DIR / "data"
 
 # Load .env before any environment-dependent values are read
 load_dotenv(dotenv_path=CODE_DIR / ".env", override=True)
 
 # ──────────────────────────────────────────────────────────────────────────────
-# DATABASE
+# DATA SOURCE
 # ──────────────────────────────────────────────────────────────────────────────
 
 SYNTHETIC_DB_PATH = CODE_DIR / "synthetic_health.db"
 DEFAULT_DB_URL = f"sqlite:///{SYNTHETIC_DB_PATH}"
+DATA_SOURCE = os.getenv('DATA_SOURCE', 'csv').strip().lower()
+CSV_DATA_DIR = Path(os.getenv('CSV_DATA_DIR', DATA_DIR))
 
 env_db = os.getenv('DATABASE_URL')
 if env_db and ('sqlite' in env_db or env_db.startswith('sqlite')):
@@ -131,7 +134,13 @@ OUTLIER_DETECTION = {
 # ──────────────────────────────────────────────────────────────────────────────
 
 def validate_config():
-    """Valideer dat de database beschikbaar is."""
+    """Valideer de geconfigureerde demo-databron."""
+    if DATA_SOURCE == 'csv':
+        if not CSV_DATA_DIR.exists():
+            logger.error("CSV data directory ontbreekt: %s", CSV_DATA_DIR)
+            return False
+        logger.info("CSV data source configured: %s", CSV_DATA_DIR)
+        return True
     if not DB_URL:
         logger.error("❌ DATABASE_URL not configured. Set DATABASE_URL environment variable.")
         return False
