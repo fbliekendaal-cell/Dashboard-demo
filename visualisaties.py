@@ -102,6 +102,19 @@ def _laad_users_tabel(base_pad: Path) -> pd.DataFrame:
 def _laad_actieve_users(base_pad: Path, include_deleted: bool = False) -> pd.DataFrame:
     """Laad users en voeg jaar toe. Optioneel inclusief verwijderde accounts."""
     df_users = _laad_users_tabel(base_pad) # Roep de database-ladende functie aan
+    if df_users is None or df_users.empty:
+        return pd.DataFrame(columns=['id', 'user_id', 'created_at', 'deleted_at'])
+
+    if 'id' not in df_users.columns:
+        for fallback_column in ('user_id', 'participant_id'):
+            if fallback_column in df_users.columns:
+                df_users = df_users.copy()
+                df_users['id'] = df_users[fallback_column]
+                break
+        else:
+            logger.warning("Users-data mist een ID-kolom; platformgroei wordt overgeslagen.")
+            return pd.DataFrame(columns=['id', 'user_id', 'created_at', 'deleted_at'])
+
     if not include_deleted and 'deleted_at' in df_users.columns:
         df_users = df_users[df_users['deleted_at'].isna()].copy()
 
