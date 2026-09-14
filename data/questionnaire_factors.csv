@@ -1,0 +1,24 @@
+id,slug,name
+1,bmi,BMI
+2,heartrisk,Cardiovasculair Risico
+3,stress,Stress Niveau
+4,sleep,Slaapkwaliteit PSQI
+5,exercise,Lichaamsbeweging
+6,fruit,Fruit Consumptie
+7,vegetables,Groente Consumptie
+8,sugar,Suiker Inname
+9,fat,Verzadigd Vet Inname
+10,salt,Zout Inname
+11,alcohol,Alcohol Consumptie
+12,smoking,Rookgedrag
+13,resilience,Veerkracht / Resilience
+14,wellbeing,Welzijn Score
+15,selfefficacy,Zelfeffectiviteit
+16,dass_stress,DASS Stress
+17,dass_anxiety,DASS Angst
+18,dass_depression,DASS Depressie
+19,job_satisfaction,Werktevredenheid
+20,workload,Werkdruk
+21,work_life_balance,Werk-Privé Balans
+22,burnout_risk,Burn-out Risico
+23,vitality,Vitaliteit

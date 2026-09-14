@@ -1,0 +1,7 @@
+id,name,city,is_active,created_at,deleted_at
+1,Hoofdkantoor Utrecht,Utrecht,1,2019-01-01 00:00:00,
+2,Distributiecentrum Venlo,Venlo,1,2019-01-01 00:00:00,
+3,Filiaal Amsterdam Centrum,Amsterdam,1,2019-01-01 00:00:00,
+4,Logistiek Rotterdam,Rotterdam,1,2019-01-01 00:00:00,
+5,Innovation Lab Eindhoven,Eindhoven,1,2019-01-01 00:00:00,
+6,Service Center Amersfoort,Amersfoort,1,2019-01-01 00:00:00,
