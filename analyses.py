@@ -8,7 +8,8 @@ import plotly.graph_objects as go
 from scipy import stats
 from pathlib import Path
 import logging
-from typing import Tuple, Union
+from collections.abc import Sequence
+from typing import Tuple, Union, cast
 from helpers import get_numeric_clean, aggregate_by_groups
 
 try:
@@ -18,6 +19,8 @@ except Exception:
     HAS_STATSMODELS = False
 
 logger = logging.getLogger(__name__)
+
+ParticipantIds = Sequence[int] | set[int] | pd.Series | None
  
 
 from i18n import tr
@@ -85,7 +88,7 @@ OUTLIER_GRENZEN = {
 # ══════════════════════════════════════════════════════════════════════════════
 # 1. DATAKWALITEIT
 # ══════════════════════════════════════════════════════════════════════════════
-def bereken_datakwaliteit(df: Union[pd.DataFrame, Path], n_totaal_override: int = None) -> pd.DataFrame:
+def bereken_datakwaliteit(df: Union[pd.DataFrame, Path], n_totaal_override: int | None = None) -> pd.DataFrame:
     """
     Berekent missende waarden en basisstatistieken voor ALLE kolommen
     met minimaal 1 ingevulde waarde.
@@ -369,7 +372,7 @@ def bereken_datakwaliteit(df: Union[pd.DataFrame, Path], n_totaal_override: int 
         if cat_kolom in df.columns:
             s_cat = pd.to_numeric(df[cat_kolom], errors='coerce')
             cat_counts = s_cat.dropna().value_counts().sort_index()
-            cat_info = ', '.join([f"{int(k)}={int(v)}" for k, v in cat_counts.items()])
+            cat_info = ', '.join([f"{int(str(k))}={int(v)}" for k, v in cat_counts.items()])
 
         rijen.append({
             'Variabele':        maak_label(kolom),
@@ -390,63 +393,6 @@ def bereken_datakwaliteit(df: Union[pd.DataFrame, Path], n_totaal_override: int 
         ])
 
     return pd.DataFrame(rijen).sort_values('Missend (%)', ascending=False)
-
-
-def bereken_duplicaat_statistieken(base_path: Path | str) -> pd.DataFrame:
-    """
-    Berekent duplicaatstatistieken voor alle Parquet bestanden in de gegeven map.
-    """
-    rijen = []
-    for file_path in base_path.glob("*.parquet"):
-        tabelnaam = file_path.stem
-        try:
-            df = pd.read_parquet(file_path)
-            total_rows = len(df)
-            
-            if total_rows == 0:
-                rijen.append({
-                    'Tabelnaam': tabelnaam,
-                    'Totaal rijen': 0,
-                    'Duplicaat rijen': 0,
-                    'Unieke rijen': 0,
-                    'Duplicaten (%)': 0.0,
-                    'ID duplicaten': 0,
-                })
-                continue
-
-            duplicate_rows = df.astype(str).duplicated().sum()
-            unique_rows = total_rows - duplicate_rows
-            pct_duplicates = (duplicate_rows / total_rows * 100) if total_rows > 0 else 0.0
-            
-            id_duplicates = 0
-            if 'id' in df.columns:
-                id_duplicates = df['id'].duplicated().sum()
-
-            rijen.append({
-                'Tabelnaam': tabelnaam,
-                'Totaal rijen': total_rows,
-                'Duplicaat rijen': duplicate_rows,
-                'Unieke rijen': unique_rows,
-                'Duplicaten (%)': round(pct_duplicates, 2),
-                'ID duplicaten': id_duplicates,
-            })
-        except Exception as e:
-            rijen.append({
-                'Tabelnaam': tabelnaam,
-                'Totaal rijen': None,
-                'Duplicaat rijen': None,
-                'Unieke rijen': None,
-                'Duplicaten (%)': None,
-                'ID duplicaten': None,
-                'Fout': str(e),
-            })
-
-    df_out = pd.DataFrame(rijen)
-    if df_out.empty:
-        return pd.DataFrame(columns=['Tabelnaam', 'Totaal rijen', 'Duplicaat rijen', 'Unieke rijen', 'Duplicaten (%)', 'ID duplicaten', 'Fout'])
-    if 'Fout' not in df_out.columns:
-        df_out['Fout'] = None
-    return df_out.sort_values(['Duplicaten (%)', 'Tabelnaam'], ascending=[False, True], na_position='last')
 
 
 def maak_missende_waarden_plot(df_kwaliteit: pd.DataFrame) -> go.Figure:
@@ -591,8 +537,8 @@ def bereken_t_toetsen(df: pd.DataFrame, geselecteerde_variabelen: list[str] | No
     rijen = []
 
     if geselecteerde_variabelen:
-        geselecteerde_variabelen = set(geselecteerde_variabelen)
-        alle_kolommen = {label: kolom for label, kolom in alle_kolommen.items() if label in geselecteerde_variabelen}
+        geselecteerde_labels = set(geselecteerde_variabelen)
+        alle_kolommen = {label: kolom for label, kolom in alle_kolommen.items() if label in geselecteerde_labels}
 
     for label, kolom in alle_kolommen.items():
         if kolom not in df.columns:
@@ -603,7 +549,9 @@ def bereken_t_toetsen(df: pd.DataFrame, geselecteerde_variabelen: list[str] | No
         if len(m) < 10 or len(v) < 10:
             continue
 
-        t_stat, p_val = stats.ttest_ind(m, v, equal_var=False)
+        toets = stats.ttest_ind(m, v, equal_var=False)
+        t_stat = cast(float, toets[0])
+        p_val = cast(float, toets[1])
 
         # Cohen's d (effectgrootte)
         pooled_std = np.sqrt((m.std()**2 + v.std()**2) / 2)
@@ -793,20 +741,10 @@ def maak_correlatiematrix(df: pd.DataFrame,
         df_corr,
         color_continuous_scale='RdYlGn',
         zmin=-1, zmax=1,
-        text_auto='.2f',
         aspect='auto',
         title=tr('Pearson correlatiematrix — leefstijl- en werkindicatoren', lang),
     )
-    fig.update_traces(textfont_size=11)
-    aangepaste_annotations = []
-    for ann in fig.layout.annotations:
-        try:
-            waarde = abs(float(ann.text))
-        except Exception:
-            waarde = 0
-        ann.font.color = 'white' if waarde >= 0.45 else 'black'
-        aangepaste_annotations.append(ann)
-    fig.update_layout(annotations=aangepaste_annotations)
+    fig.update_traces(texttemplate='%{z:.2f}', textfont_size=11)
     fig.update_layout(
         height=600,
         coloraxis_colorbar_title='Correlatie',
@@ -987,7 +925,9 @@ def genereer_inzichten(df: pd.DataFrame,
             'type': 'info',
         })
 
-def bereken_risico_migratie(df_long: pd.DataFrame, slug: str, participant_ids: list | set | pd.Series | None = None) -> pd.DataFrame:
+    return inzichten
+
+def bereken_risico_migratie(df_long: pd.DataFrame, slug: str, participant_ids: ParticipantIds = None) -> pd.DataFrame:
     """
     Berekent de verschuiving tussen risicocategorieën tussen de eerste en laatste meting.
     Nodig voor de 'Transition Matrix' (Sankey).
@@ -1021,12 +961,12 @@ def bereken_risico_migratie(df_long: pd.DataFrame, slug: str, participant_ids: l
     if migratie.empty:
         return pd.DataFrame()
         
-    return migratie.groupby(['Van', 'Na']).size().reset_index(name='Aantal')
+    return migratie.groupby(['Van', 'Na'], observed=False).size().reset_index(name='Aantal')
 # ──────────────────────────────────────────────────────────────────────────────
 # FIX #1: ONTBREKENDE FUNCTIE - bereken_duplicaat_statistieken
 # ──────────────────────────────────────────────────────────────────────────────
 
-def bereken_duplicaat_statistieken(base_path: Path) -> pd.DataFrame:
+def bereken_duplicaat_statistieken(base_path: Path | str) -> pd.DataFrame:
     """
     Berekent duplicaatstatistieken voor alle Parquet bestanden in een directory.
     
@@ -1283,7 +1223,9 @@ def bereken_t_toetsen_improved(df: pd.DataFrame) -> pd.DataFrame:
             continue
         
         try:
-            t_stat, p_val = stats.ttest_ind(m, v, equal_var=False)
+            toets = stats.ttest_ind(m, v, equal_var=False)
+            t_stat = cast(float, toets[0])
+            p_val = cast(float, toets[1])
             
             # Cohen's d
             pooled_std = np.sqrt((m.std()**2 + v.std()**2) / 2)
@@ -1316,8 +1258,8 @@ def bereken_t_toetsen_improved(df: pd.DataFrame) -> pd.DataFrame:
 # FIX #5: NEW FUNCTION - Vragenlijst herhalingen analyseren
 # ──────────────────────────────────────────────────────────────────────────────
 
-def analyse_vragenlijst_herhalingen(base_pad: Path, db_url: str = None,
-                                    participant_ids: list | set | pd.Series | None = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
+def analyse_vragenlijst_herhalingen(base_pad: Path, db_url: str | None = None,
+                                    participant_ids: ParticipantIds = None) -> Tuple[pd.DataFrame, pd.DataFrame]:
     """
     Analyseert wie dezelfde vragenlijst meerdere keren invullen.
     Toont gehashte participant IDs en echte vragenlijstnamen uit database.
@@ -1430,7 +1372,7 @@ def analyse_vragenlijst_herhalingen(base_pad: Path, db_url: str = None,
 
 
 def analyse_vragenlijst_dropoff(base_pad: Path,
-                                participant_ids: list | set | pd.Series | None = None) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
+                                participant_ids: ParticipantIds = None) -> Tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Benadert afhaken in vragenlijsten via het aantal beantwoorde score-items per completion.
     Omdat er lokaal geen expliciete completion-status beschikbaar is, gebruiken we het
@@ -1632,9 +1574,9 @@ INVULFREQUENTIE_SCORE_KOLOMMEN = {
 
 def analyse_invulfrequentie_vs_scores(
     base_pad: Path,
-    db_url: str = None,
+    db_url: str | None = None,
     score_kolom: str = 'rec_ls_lifestyle_score',
-    participant_ids: list | set | pd.Series | None = None,
+    participant_ids: ParticipantIds = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Vergelijk gemiddelde scores per aantal ingevulde vragenlijsten (1x, 2x, 3x, ...).
@@ -1645,8 +1587,11 @@ def analyse_invulfrequentie_vs_scores(
     from data_ingestion import load_completions, load_my_clic_participants_expanded
 
     try:
-        df_comp = load_completions(db_url)
-        df_scores = load_my_clic_participants_expanded(db_url)
+        effective_db_url = db_url or DB_URL
+        if not effective_db_url:
+            return pd.DataFrame(), pd.DataFrame(), {}
+        df_comp = load_completions(effective_db_url)
+        df_scores = load_my_clic_participants_expanded(effective_db_url)
 
         if participant_ids is not None:
             pids = set(pd.to_numeric(pd.Series(list(participant_ids)), errors='coerce').dropna().astype(int))
@@ -1736,7 +1681,7 @@ def analyse_invulfrequentie_vs_scores(
         return pd.DataFrame(), pd.DataFrame(), {}
 
 
-def haal_vragenlijsten_overzicht(db_url: str = None) -> pd.DataFrame:
+def haal_vragenlijsten_overzicht(db_url: str | None = None) -> pd.DataFrame:
     """Laad vragenlijst-id's met namen en aantal completions."""
     from sqlalchemy import create_engine, text
     from data_ingestion import load_completions
@@ -1814,7 +1759,7 @@ def haal_scores_voor_vragenlijst(db_url: str, questionnaire_id: int) -> list[str
 
 def analyse_herhaalde_vragenlijst_scoreverandering(
     base_pad: Path,
-    db_url: str = None,
+    db_url: str | None = None,
     questionnaire_id: int = 2,
     score_slug: str = 'rec_ls_lifestyle_score',
     participant_ids: list | set | pd.Series | None = None,
@@ -1876,10 +1821,10 @@ def analyse_herhaalde_vragenlijst_scoreverandering(
         for participant_id, grp in df.groupby('participant_id'):
             grp = grp.sort_values('completion_at').reset_index(drop=True)
             n_totaal = len(grp)
-            for i, row in grp.iterrows():
+            for i, (_, row) in enumerate(grp.iterrows(), start=1):
                 timeline_rows.append({
                     'participant_id': participant_id,
-                    'invul_nr': i + 1,
+                    'invul_nr': i,
                     'n_totaal': n_totaal,
                     'score': row['score'],
                     'completion_at': row['completion_at'],
@@ -1955,7 +1900,7 @@ def analyse_herhaalde_vragenlijst_scoreverandering(
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {}
 
 
-def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, participant_ids: list | set | pd.Series | None = None) -> tuple[pd.DataFrame, dict]:
+def analyse_account_dataflow_funnel(base_pad: Path, db_url: str | None = None, participant_ids: ParticipantIds = None) -> tuple[pd.DataFrame, dict]:
     """
     Bouw een account-/vragenlijstfunnel op basis van beschikbare databronnen.
 
@@ -2050,10 +1995,10 @@ def analyse_account_dataflow_funnel(base_pad: Path, db_url: str = None, particip
             return False
 
         df['has_name'] = df.apply(_has_name, axis=1)
-        df['has_leeftijd'] = pd.to_numeric(df.get('rec_age_current'), errors='coerce').notna()
-        df['has_geslacht'] = pd.to_numeric(df.get('rec_user_gender'), errors='coerce').notna()
+        df['has_leeftijd'] = pd.to_numeric(df['rec_age_current'], errors='coerce').notna() if 'rec_age_current' in df.columns else False
+        df['has_geslacht'] = pd.to_numeric(df['rec_user_gender'], errors='coerce').notna() if 'rec_user_gender' in df.columns else False
         df['has_gestart'] = df['participant_id'].isin(comp_ids)
-        df['has_scores'] = pd.to_numeric(df.get('rec_ls_lifestyle_score'), errors='coerce').notna()
+        df['has_scores'] = pd.to_numeric(df['rec_ls_lifestyle_score'], errors='coerce').notna() if 'rec_ls_lifestyle_score' in df.columns else False
 
         # Herhaalde invulling / andere vragenlijst, op basis van completions.
         herhaal_ids = set()

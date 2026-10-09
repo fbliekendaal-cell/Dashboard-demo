@@ -18,11 +18,10 @@ import ML
 def _get_model_predictions(model: Pipeline, X: pd.DataFrame, y_true: pd.Series, model_type: str) -> np.ndarray:
     """Helper om voorspellingen te krijgen, rekening houdend met modeltype en thresholds."""
     if model_type == "classification":
-        # predict_bp en predict_heartrisk passen al thresholds toe
-        if hasattr(ML, 'predict_bp') and model == ML.train_bp_model(X, force_retrain=False)[0]:
+        if hasattr(model, 'decision_threshold') and hasattr(ML, 'predict_binary_model'):
+            preds, _ = ML.predict_binary_model(model, X)
+        elif hasattr(model, 'best_thresholds') and hasattr(ML, 'predict_bp'):
             preds, _ = ML.predict_bp(model, X)
-        elif hasattr(ML, 'predict_heartrisk') and model == ML.train_heartrisk_model(X, force_retrain=False)[0]:
-            preds, _ = ML.predict_heartrisk(model, X)
         else: # Algemene classificatie (bijv. lifestyle classificatie)
             preds = model.predict(X)
     else: # Regression

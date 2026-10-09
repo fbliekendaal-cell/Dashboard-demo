@@ -51,12 +51,6 @@ def filter_by_gender(df, gender):
     val = 1 if gender == 'man' else 0
     return df[pd.to_numeric(df['rec_user_gender'], errors='coerce') == val]
 
-def normalize_to_scale(s, target_max=10):
-    """Normaliseert een serie naar een schaal (bijv. 0-10)."""
-    if s.empty or s.max() == 0:
-        return s
-    return s * (target_max / s.max())
-
 def calculate_kpi_count(df, kolom, waarde, op='eq'):
     """Berekent KPI tellingen (aantal, totaal, percentage)."""
     if df is None or df.empty or kolom not in df.columns:

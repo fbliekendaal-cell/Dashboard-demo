@@ -1,3 +1,7 @@
+# pyright: reportGeneralTypeIssues=false
+# pyright: reportAttributeAccessIssue=false
+# pyright: reportUnboundVariable=false
+
 import sys
 import subprocess
 import importlib
@@ -5,6 +9,7 @@ import logging
 import json
 import re
 from pathlib import Path
+from typing import cast
 
 import pandas as pd
 import numpy as np
@@ -21,7 +26,10 @@ if str(CURRENT_DIR) not in sys.path:
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
-from config import BASE, HTML_DIR as HTML_MAP, FEATURES, CACHE_TTL_SECONDS, setup_logger, DB_URL, CODE_DIR
+from config import (
+    BASE, HTML_DIR as HTML_MAP, FEATURES, CACHE_TTL_SECONDS, setup_logger,
+    DB_URL, CODE_DIR, LOOKER_STUDIO_EMBED_URL, DATA_SOURCE,
+)
 DATA_PATH = BASE
 
 from auth import require_login, logout, is_admin
@@ -40,6 +48,13 @@ from helpers import (
 
 logger = setup_logger(__name__)
 
+
+def _numeric_column(df: pd.DataFrame, column: str) -> pd.Series:
+    """Return a numeric column with NaN values when the column is absent."""
+    if column not in df.columns:
+        return pd.Series(np.nan, index=df.index, dtype='float64')
+    return pd.to_numeric(df[column], errors='coerce')
+
 def load_main_data_safe(db_url: str) -> pd.DataFrame:
     try:
         df = _load_my_clic_participants_cached(db_url)
@@ -54,15 +69,10 @@ def load_main_data_safe(db_url: str) -> pd.DataFrame:
 def _load_my_clic_participants_cached(db_url: str) -> pd.DataFrame:
     try:
         # Gebruik de geconsolideerde tabel als primaire bron
-        df = load_my_clic_participants_expanded(db_url)
-        return df
+        return load_my_clic_participants_expanded(db_url)
     except Exception as e:
-        logger.error(f"Error loading participants: {e}"); 
-        # Try fallback
-        try:
-            return load_my_clic_participants_expanded(db_url)
-        except:
-            return pd.DataFrame()
+        logger.error(f"Error loading participants: {e}", exc_info=True)
+        return pd.DataFrame()
 
 st.set_page_config(page_title="Smart Health Dashboard", page_icon="🏥", layout="wide", initial_sidebar_state="expanded")
 require_login()
@@ -76,6 +86,7 @@ else:
     logger.info("Translations bootstrap script ontbreekt; veilig overgeslagen.")
 
 from kleuren import RISICO_COLORS, HEARTRISK_LABELS, BMI_LABELS, BMI_COLORS, STRESS_LABELS
+from categorieen import categorie_labels
 import visualisaties # Import the module first
 from variabelen import VARIABELEN_PER_GROEP, VARIABELEN_DICT
 from i18n import tr, translate_variable_specs, translate_plotly_figure, translate_matplotlib_figure, translate_dataframe
@@ -85,27 +96,76 @@ from analyses import (bereken_datakwaliteit, maak_missende_waarden_plot, bereken
     T_TOETS_EXTRA_VARIABELEN,
     analyse_invulfrequentie_vs_scores, INVULFREQUENTIE_SCORE_KOLOMMEN,
     haal_vragenlijsten_overzicht, haal_scores_voor_vragenlijst, analyse_herhaalde_vragenlijst_scoreverandering)
-from visualisaties import (laad_data, laad_longitudinale_data, bereken_verandering, maak_geslacht_plot, maak_leeftijd_plot,
-    maak_heartrisk_plot, maak_heartrisk_naar_geslacht_plot, maak_bmi_plot, maak_stress_plot, maak_leefstijl_score_plot,
-    maak_bmi_beweging_plot, maak_scoreverandering_plot, voeg_dieet_score_toe, maak_dieet_verdeling_plot, maak_dieet_bmi_plot,
-    maak_dieet_score_histogram, maak_verkenner_plot, maak_platform_groei_plot, maak_account_activatie_plot, maak_vragenlijst_plot,
-    maak_kopers_vergelijking_plot, maak_artikel_interacties_overzicht, maak_scores_per_opdrachtgever, maak_store_scoreverbetering_plot, maak_gemiddelde_score_over_tijd_plot,
-    get_available_stores, maak_store_gemiddelde_scores_plot, maak_store_gemiddelde_verandering_plot, maak_update_verificatie_plot,
-    get_available_stores_from_average_scores, get_available_stores_with_score_changes, maak_meerdere_vragenlijsten_plot, maak_vroege_kopers_profiel,)
-
 # Force reload of the visualisaties module to ensure latest changes are picked up
+# Import once after reload to avoid duplicate symbol imports and keep the module API explicit.
 importlib.reload(visualisaties)
 
-# Now import specific functions from the reloaded module
-from visualisaties import (laad_data, laad_longitudinale_data, bereken_verandering, maak_geslacht_plot, maak_leeftijd_plot, maak_heartrisk_plot, maak_heartrisk_naar_geslacht_plot, maak_bmi_plot, maak_stress_plot, maak_leefstijl_score_plot, maak_bmi_beweging_plot, maak_scoreverandering_plot, voeg_dieet_score_toe, maak_dieet_verdeling_plot, maak_dieet_bmi_plot, maak_dieet_score_histogram, maak_verkenner_plot, maak_platform_groei_plot, maak_account_activatie_plot, maak_vragenlijst_plot, maak_kopers_vergelijking_plot, maak_artikel_interacties_overzicht, maak_scores_per_opdrachtgever, maak_store_scoreverbetering_plot, maak_gemiddelde_score_over_tijd_plot, get_available_stores, maak_store_gemiddelde_scores_plot, maak_store_gemiddelde_verandering_plot, maak_update_verificatie_plot, get_available_stores_from_average_scores, get_available_stores_with_score_changes, maak_meerdere_vragenlijsten_plot, maak_vroege_kopers_profiel, maak_risico_migratie_sankey, bereken_engagement_journey, maak_engagement_funnel_plot, maak_business_value_plot, maak_herhaalde_vragenlijst_scoreverandering_plot, maak_account_dataflow_funnel_plot, bereken_engagement_per_opdrachtgever, maak_engagement_opdrachtgever_ranking_plot, maak_engagement_breakdown_plot, bereken_engagement_trend, maak_engagement_trend_plot, ENGAGEMENT_COMPONENT_DEFAULTS, _laad_analytics_data, bereken_kpi_metrics, bereken_dagelijkse_trends, bereken_wekelijkse_trends, bereken_maandelijkse_trends, bereken_jaar_trends, maak_engagement_bar_chart, bereken_page_performance, bereken_top_health_partners, LOOKER_KLEUREN)
+from visualisaties import (
+    laad_data,
+    laad_longitudinale_data,
+    bereken_verandering,
+    maak_geslacht_plot,
+    maak_leeftijd_plot,
+    maak_heartrisk_plot,
+    maak_heartrisk_naar_geslacht_plot,
+    maak_bmi_plot,
+    maak_stress_plot,
+    maak_leefstijl_score_plot,
+    maak_bmi_beweging_plot,
+    maak_scoreverandering_plot,
+    voeg_dieet_score_toe,
+    maak_dieet_verdeling_plot,
+    maak_dieet_bmi_plot,
+    maak_dieet_score_histogram,
+    maak_verkenner_plot,
+    maak_platform_groei_plot,
+    maak_account_activatie_plot,
+    maak_vragenlijst_plot,
+    maak_kopers_vergelijking_plot,
+    maak_artikel_interacties_overzicht,
+    maak_scores_per_opdrachtgever,
+    maak_store_scoreverbetering_plot,
+    maak_gemiddelde_score_over_tijd_plot,
+    get_available_stores,
+    maak_store_gemiddelde_scores_plot,
+    maak_store_gemiddelde_verandering_plot,
+    maak_update_verificatie_plot,
+    get_available_stores_from_average_scores,
+    get_available_stores_with_score_changes,
+    maak_meerdere_vragenlijsten_plot,
+    maak_vroege_kopers_profiel,
+    maak_risico_migratie_sankey,
+    bereken_engagement_journey,
+    maak_engagement_funnel_plot,
+    maak_business_value_plot,
+    maak_herhaalde_vragenlijst_scoreverandering_plot,
+    maak_account_dataflow_funnel_plot,
+    bereken_engagement_per_opdrachtgever,
+    build_engagement_summary_stats,
+    maak_engagement_opdrachtgever_ranking_plot,
+    maak_engagement_breakdown_plot,
+    bereken_engagement_trend,
+    maak_engagement_trend_plot,
+    ENGAGEMENT_COMPONENT_DEFAULTS,
+    _laad_analytics_data,
+    bereken_kpi_metrics,
+    bereken_dagelijkse_trends,
+    bereken_wekelijkse_trends,
+    bereken_maandelijkse_trends,
+    bereken_jaar_trends,
+    maak_engagement_bar_chart,
+    bereken_page_performance,
+    bereken_top_health_partners,
+    LOOKER_KLEUREN,
+)
 
 # ── Cache helpers ───────────────────────────────────────────────────────────────
 @st.cache_data(ttl=CACHE_TTL_SECONDS['main_data'])
 def load_main_data() -> pd.DataFrame:
     df = load_main_data_safe(DB_URL)
     if not df.empty:
-        steps = pd.to_numeric(df.get('rec_ls_exercise_steps_per_day'), errors='coerce') * 1000
-        mins = pd.to_numeric(df.get('rec_ls_exercise_physical_activity_minutes_total'), errors='coerce')
+        steps = _numeric_column(df, 'rec_ls_exercise_steps_per_day') * 1000
+        mins = _numeric_column(df, 'rec_ls_exercise_physical_activity_minutes_total')
         is_active, is_inactive = (steps >= 5000) | (mins >= 250), (steps < 5000) & (mins < 250)
         df['derived_is_inactive'] = np.nan
         df.loc[is_active, 'derived_is_inactive'] = 0
@@ -131,6 +191,7 @@ load_ml_data = load_main_data
 train_bp_model = getattr(ml_module, "train_bp_model", None)
 train_heartrisk_model = getattr(ml_module, "train_heartrisk_model", None)
 train_lifestyle_model = getattr(ml_module, "train_lifestyle_model", None)
+train_next_lifestyle_model = getattr(ml_module, "train_next_lifestyle_model", None)
 train_dropoff_model = getattr(ml_module, "train_dropoff_model", None)
 train_improvement_model = getattr(ml_module, "train_improvement_model", None)
 train_purchase_model = getattr(ml_module, "train_purchase_model", None)
@@ -164,6 +225,7 @@ DATUM_KOLOMMEN = [
 AFDELING_KOLOMMEN = ["department", "afdeling", "team", "business_unit"]
 FUNCTIE_KOLOMMEN = ["function", "functie", "job_title", "role"]
 MIN_VISUALISATIE_DEELNEMERS = 1
+MIN_INTERNATIONALE_DEELNEMERS = 6
 
 
 def _tab_default_for_path(path: str | None, labels: list[str]) -> str | None:
@@ -184,8 +246,8 @@ def filter_geslacht(df: pd.DataFrame, geslacht: str) -> pd.DataFrame:
     gender_kolom = 'rec_user_gender' if 'rec_user_gender' in df.columns else 'user_gender' if 'user_gender' in df.columns else None
     if not gender_kolom:
         return df
-    if geslacht == 'man': return df[pd.to_numeric(df.get(gender_kolom), errors='coerce') == 1]
-    elif geslacht == 'vrouw': return df[pd.to_numeric(df.get(gender_kolom), errors='coerce') == 0]
+    if geslacht == 'man': return df[_numeric_column(df, gender_kolom) == 1]
+    elif geslacht == 'vrouw': return df[_numeric_column(df, gender_kolom) == 0]
     return df
 
 
@@ -193,7 +255,7 @@ def _gender_participant_sets(df: pd.DataFrame) -> dict[str, tuple[int, ...]]:
     """Return participant IDs for the two groups used by comparison mode."""
     if df is None or df.empty or 'participant_id' not in df.columns:
         return {'Man': tuple(), 'Vrouw': tuple()}
-    gender = pd.to_numeric(df.get('rec_user_gender'), errors='coerce')
+    gender = _numeric_column(df, 'rec_user_gender')
     participant_ids = pd.to_numeric(df['participant_id'], errors='coerce')
     return {
         'Man': tuple(participant_ids[gender.eq(1)].dropna().astype(int).unique()),
@@ -209,9 +271,9 @@ def filter_store(df: pd.DataFrame, store_id: int | None) -> pd.DataFrame:
     # store present, filter directly on that. Otherwise fall back to the
     # canonical participant->store links and filter by participant_id.
     try:
-        store_vals = pd.to_numeric(df.get('store_id'), errors='coerce').dropna().unique()
+        store_vals = _numeric_column(df, 'store_id').dropna().unique()
         if len(store_vals) and int(store_id) in [int(x) for x in store_vals]:
-            return df[pd.to_numeric(df.get('store_id'), errors='coerce') == int(store_id)]
+            return df[_numeric_column(df, 'store_id') == int(store_id)]
     except Exception:
         pass
 
@@ -222,7 +284,7 @@ def filter_store(df: pd.DataFrame, store_id: int | None) -> pd.DataFrame:
         if links is not None and not links.empty and 'participant_id' in links.columns:
             pids = links.loc[pd.to_numeric(links['store_id'], errors='coerce') == int(store_id), 'participant_id'].dropna().unique()
             if len(pids):
-                return df[pd.to_numeric(df.get('participant_id'), errors='coerce').isin([int(x) for x in pids])]
+                return df[_numeric_column(df, 'participant_id').isin([int(x) for x in pids])]
     except Exception:
         pass
 
@@ -316,7 +378,7 @@ def _pct_context_label(geslacht: str) -> str:
 
 
 def _leeftijd_categorieen(df: pd.DataFrame) -> pd.Series:
-    leeftijd = pd.to_numeric(df.get("rec_age_current"), errors='coerce')
+    leeftijd = _numeric_column(df, 'rec_age_current')
     categorie = pd.cut(
         leeftijd,
         bins=[0, 30, 40, 50, 60, float("inf")],
@@ -442,8 +504,8 @@ def get_available_stores_dashboard() -> pd.DataFrame:
         if df_main is None or df_main.empty:
             return pd.DataFrame(columns=['store_id', 'store_name'])
 
-        main_ids = pd.to_numeric(df_main.get('store_id'), errors='coerce').dropna().unique()
-        main_ids = sorted(int(x) for x in main_ids)
+        store_ids = _numeric_column(df_main, 'store_id').dropna()
+        main_ids = sorted(int(x) for x in store_ids.unique())
 
         try:
             from data_ingestion import load_stores
@@ -460,8 +522,9 @@ def get_available_stores_dashboard() -> pd.DataFrame:
         rows = []
         for sid in main_ids:
             display = None
-            if not stores_meta.empty and name_col:
-                match = stores_meta[pd.to_numeric(stores_meta.get('id'), errors='coerce') == int(sid)]
+            if not stores_meta.empty and name_col and 'id' in stores_meta.columns:
+                id_values = _numeric_column(stores_meta, 'id')
+                match = stores_meta[id_values == int(sid)]
                 if not match.empty:
                     display = str(match.iloc[0][name_col])
             if not display:
@@ -519,13 +582,13 @@ def _beschikbare_opdrachtgever_indicatoren(df: pd.DataFrame, min_stores: int = 2
         'rec_asr_job_satisfaction_score': 'Werktevredenheid',
         'rec_asr_workload_score': 'Werkdruk',
         'rec_asr_exhaustion_score': 'Uitputting',
-        'rec_ls_score_fruit': 'Fruit score',
-        'rec_ls_score_vegetables': 'Groenten score',
-        'rec_ls_score_sugar': 'Suiker score',
-        'rec_ls_score_saturated_fat': 'Vet score',
-        'rec_ls_score_alcohol': 'Alcohol score',
-        'rec_ls_score_natrium': 'Zout score',
-        'rec_ls_score_exercise': 'Bewegen score',
+        'rec_ls_score_fruit': 'Fruit (stuks/dag)',
+        'rec_ls_score_vegetables': 'Groenten (gram/dag)',
+        'rec_ls_score_sugar': 'Suiker (gram/dag)',
+        'rec_ls_score_saturated_fat': 'Verzadigd vet (gram/dag)',
+        'rec_ls_score_alcohol': 'Alcohol (glazen/week)',
+        'rec_ls_score_natrium': 'Natrium (mg/dag)',
+        'rec_ls_score_exercise': 'Beweegminuten (min/week)',
     }
     fallback = {label: slug for slug, label in voorkeurslabels.items()}
 
@@ -644,7 +707,7 @@ OVERZICHTS_KPI_SPECS = {
     'Overgewicht': ('rec_med_bmi_cat', 1, 'ge'),
     'Slechte slaap': ('rec_ls_sleep_cat', 1, 'ge'),
     'Niet fysiek actief': ('derived_is_inactive', 1, 'eq'),
-    'Roker': ('rec_smoking_answer', 6, 'eq'),
+    'Roker': ('rec_smoking_answer', 3, 'eq'),
     'Diabetes': ('rec_med_diabetes_cat', 2, 'eq'),
     'Hoge bloeddruk': ('rec_med_blood_pressure_cat', 2, 'eq'),
 }
@@ -683,7 +746,7 @@ def get_duplicaat_statistieken() -> pd.DataFrame:
      return bereken_duplicaat_statistieken(DB_URL)
 
 @st.cache_data
-def get_datakwaliteit(geslacht: str, n_totaal: int = None, filter_signature: tuple = ()) -> pd.DataFrame:
+def get_datakwaliteit(geslacht: str, n_totaal: int | None = None, filter_signature: tuple = ()) -> pd.DataFrame:
     df_actief = _active_participant_rows(load_main_data_filtered_by_gender_and_store(geslacht))
     return bereken_datakwaliteit(df_actief,
                                   n_totaal_override=n_totaal)
@@ -721,7 +784,9 @@ def _bereken_store_vs_totaal_t_toets(df: pd.DataFrame, store_id: int | None, kol
         b = b[~b.index.isin(a.index)]
         if len(a) < 10 or len(b) < 10:
             continue
-        t_stat, p_val = stats.ttest_ind(a, b, equal_var=False)
+        toets = stats.ttest_ind(a, b, equal_var=False)
+        t_stat = cast(float, toets[0])
+        p_val = cast(float, toets[1])
         pooled_std = np.sqrt((a.std()**2 + b.std()**2) / 2)
         cohens_d = (a.mean() - b.mean()) / pooled_std if pooled_std > 0 else 0
         label = next((k for k, v in {**LEEFSTIJL_SCORES, **RUWE_WAARDEN}.items() if v == kolom), kolom)
@@ -756,7 +821,7 @@ def get_longitudinale_stores():
     return get_available_stores(BASE, DB_URL)
 
 @st.cache_data
-def get_store_scoreverbetering(score_type: str, maanden_window: int = 3, store_id: int = None):
+def get_store_scoreverbetering(score_type: str, maanden_window: int = 3, store_id: int | None = None):
     return maak_store_scoreverbetering_plot(BASE, DB_URL, score_type=score_type, maanden_window=maanden_window, store_id=store_id)
 
 @st.cache_data
@@ -771,46 +836,54 @@ def get_store_average_stores_with_changes(score_slug: str, min_deelnemers: int =
 
 @st.cache_data
 def get_store_gemiddelde_scores(score_slug: str, score_label: str, min_deelnemers: int = 1,
-                                store_id: int = None, richting_label: str = '', participant_ids: tuple[int, ...] = tuple()):
+                                store_id: int | None = None, richting_label: str = '', participant_ids: tuple[int, ...] = tuple()):
+    participant_list = list(participant_ids) if participant_ids else None
     return maak_store_gemiddelde_scores_plot(
         BASE, score_slug=score_slug, score_label=score_label,
-        min_deelnemers=min_deelnemers, store_id=store_id, participant_ids=participant_ids or None
+        min_deelnemers=min_deelnemers, store_id=store_id, participant_ids=participant_list
     )
 
 @st.cache_data
 def get_store_gemiddelde_verandering(score_slug: str, score_label: str, min_deelnemers: int = 1,
-                                     store_id: int = None, richting_label: str = '', participant_ids: tuple[int, ...] = tuple()):
+                                     store_id: int | None = None, richting_label: str = '', participant_ids: tuple[int, ...] = tuple()):
+    participant_list = list(participant_ids) if participant_ids else None
     return maak_store_gemiddelde_verandering_plot(
         BASE, score_slug=score_slug, score_label=score_label,
-        min_deelnemers=min_deelnemers, store_id=store_id, participant_ids=participant_ids or None
+        min_deelnemers=min_deelnemers, store_id=store_id, participant_ids=participant_list
     )
 
 @st.cache_data
 def get_scores_opdrachtgever(indicator: str, label: str, min_n: int, participant_ids: tuple[int, ...] = tuple()):
-    return maak_scores_per_opdrachtgever(BASE, DB_URL, indicator, label, min_n, participant_ids=participant_ids or None)
+    participant_list = list(participant_ids) if participant_ids else None
+    return maak_scores_per_opdrachtgever(BASE, DB_URL, indicator, label, min_n, participant_ids=participant_list)
 
 
 @st.cache_data
 def get_vragenlijst_data(participant_ids: tuple[int, ...] = tuple()):
-    return maak_vragenlijst_plot(BASE, DB_URL, participant_ids=participant_ids or None)
+    participant_list = list(participant_ids) if participant_ids else None
+    return maak_vragenlijst_plot(BASE, DB_URL, participant_ids=participant_list)
 
 @st.cache_data
 def get_kopers_data(participant_ids: tuple[int, ...] = tuple()):
-    return maak_kopers_vergelijking_plot(BASE, DB_URL, participant_ids=participant_ids or None)
+    participant_list = list(participant_ids) if participant_ids else None
+    return maak_kopers_vergelijking_plot(BASE, DB_URL, participant_ids=participant_list)
 
 @st.cache_data
 def get_vragenlijst_gedrag(participant_ids: tuple[int, ...] = tuple()):
-    return maak_meerdere_vragenlijsten_plot(BASE, participant_ids=participant_ids or None)
+    participant_list = list(participant_ids) if participant_ids else None
+    return maak_meerdere_vragenlijsten_plot(BASE, participant_ids=participant_list)
 
 @st.cache_data
 def get_vroege_kopers_profiel(participant_ids: tuple[int, ...] = tuple()):
-    return maak_vroege_kopers_profiel(BASE, DB_URL, participant_ids=participant_ids or None)
+    participant_list = list(participant_ids) if participant_ids else None
+    return maak_vroege_kopers_profiel(BASE, DB_URL, participant_ids=participant_list)
 
 @st.cache_data
 def get_vroege_kopers_profiel_filtered(groepen: tuple[str, ...], include_wellbeing: bool, participant_ids: tuple[int, ...] = tuple()):
+    participant_list = list(participant_ids) if participant_ids else None
     return maak_vroege_kopers_profiel(
         BASE, DB_URL, list(groepen), include_wellbeing=include_wellbeing,
-        participant_ids=participant_ids or None,
+        participant_ids=participant_list,
     )
 
 @st.cache_data
@@ -887,11 +960,13 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_ls = force_retrain_all or (model_name_to_retrain == 'lifestyle')
             ls_model, X_test_ls, y_test_ls, features_ls, y_train_ls = train_lifestyle_model(df, force_retrain=force_ls)
             y_pred_ls = predict_lifestyle(ls_model, X_test_ls)
+            if y_pred_ls is None or y_test_ls is None:
+                raise ValueError("Lifestyle model returned no predictions")
             ls_cv_metrics = getattr(ls_model, "cv_metrics", None) or {}
-            
+
             # Bepaal of we classificatie of regressie metrics tonen
             is_clf = getattr(ml_module, 'LIFESTYLE_USE_CLASSIFICATION', False)
-            
+
             ls_metrics = {}
             if is_clf:
                 ls_metrics = {
@@ -926,8 +1001,10 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_bp = force_retrain_all or (model_name_to_retrain == 'bp')
             bp_model, X_test_bp, y_test_bp, features_bp, y_train_bp = train_bp_model(df, force_retrain=force_bp)
             y_pred_bp, y_pred_bp_proba = predict_bp(bp_model, X_test_bp)
+            if y_pred_bp is None or y_test_bp is None:
+                raise ValueError("Blood pressure model returned no predictions")
             bp_cv_metrics = getattr(bp_model, "cv_metrics", None) or {}
-            
+
             accuracy_bp = accuracy_score(y_test_bp, y_pred_bp)
             recall_bp = recall_score(y_test_bp, y_pred_bp, average='macro')
 
@@ -944,6 +1021,13 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
                     'Recall Macro': recall_bp,
                     'CV Accuracy': float(bp_cv_metrics.get('accuracy_mean', 0.0)),
                     'CV Recall Macro': float(bp_cv_metrics.get('recall_macro', 0.0)),
+                    'Average Precision': float(bp_cv_metrics.get('holdout_average_precision', 0.0)),
+                    'CV Average Precision': float(bp_cv_metrics.get('average_precision_mean', 0.0)),
+                    'Brier': float(bp_cv_metrics.get('holdout_brier', 0.0)),
+                    'CV Brier': float(bp_cv_metrics.get('brier_mean', 0.0)),
+                    'Precision': float(bp_cv_metrics.get('holdout_precision', 0.0)),
+                    'Recall': float(bp_cv_metrics.get('holdout_recall', 0.0)),
+                    'Decision threshold': float(bp_cv_metrics.get('decision_threshold', 0.5)),
                 }
             }
         except Exception as e:
@@ -955,9 +1039,10 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_hr = force_retrain_all or (model_name_to_retrain == 'heartrisk')
             heartrisk_model, X_test_hr, y_test_hr, features_hr, y_train_hr = train_heartrisk_model(df, force_retrain=force_hr)
             y_pred_hr, y_pred_hr_proba = predict_heartrisk(heartrisk_model, X_test_hr)
+            if y_pred_hr is None or y_test_hr is None:
+                raise ValueError("Heart risk model returned no predictions")
             heartrisk_cv_metrics = getattr(heartrisk_model, "cv_metrics", None) or {}
-            heartrisk_threshold_scan_top = heartrisk_cv_metrics.get("threshold_search_top", []) or []
-            
+
             accuracy_hr = accuracy_score(y_test_hr, y_pred_hr)
             recall_hr = recall_score(y_test_hr, y_pred_hr, average='macro')
             recall_hr_moderate = recall_score(
@@ -975,7 +1060,6 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
                 'y_pred_proba': y_pred_hr_proba,
                 'features': features_hr,
                 'y_train': y_train_hr,
-                'threshold_scan_top': heartrisk_threshold_scan_top,
                 'metrics': {
                     'Accuracy': accuracy_hr,
                     'Recall macro': recall_hr,
@@ -987,10 +1071,41 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
                     'CV Recall hoog risico std': float(heartrisk_cv_metrics.get('recall_high_std', 0.0) or 0.0),
                     'CV Recall macro': float(heartrisk_cv_metrics.get('recall_macro_mean', 0.0) or 0.0),
                     'CV Recall macro std': float(heartrisk_cv_metrics.get('recall_macro_std', 0.0) or 0.0),
+                    'Brier hoge risico': float(heartrisk_cv_metrics.get('holdout_brier_high', 0.0) or 0.0),
                 }
             }
         except Exception as e:
             res['heartrisk_error'] = str(e)
+
+    # Train next lifestyle score model
+    if train_next_lifestyle_model:
+        try:
+            force_next_lifestyle = force_retrain_all or (model_name_to_retrain == 'next_lifestyle')
+            next_model, X_test_next, y_test_next, features_next, y_train_next = train_next_lifestyle_model(
+                df,
+                force_retrain=force_next_lifestyle,
+            )
+            y_pred_next = np.clip(next_model.predict(X_test_next), 0.0, 10.0)
+            next_cv_metrics = getattr(next_model, "cv_metrics", None) or {}
+            res['next_lifestyle'] = {
+                'model': next_model,
+                'X_test': X_test_next,
+                'y_test': y_test_next,
+                'y_pred': y_pred_next,
+                'features': features_next,
+                'y_train': y_train_next,
+                'metrics': {
+                    'MAE': mean_absolute_error(y_test_next, y_pred_next),
+                    'RMSE': np.sqrt(mean_squared_error(y_test_next, y_pred_next)),
+                    'R² Score': r2_score(y_test_next, y_pred_next),
+                    'CV R² Score': float(next_cv_metrics.get('r2_mean', 0.0)),
+                    'CV MAE': float(next_cv_metrics.get('mae_mean', 0.0)),
+                    'Baseline MAE': float(next_cv_metrics.get('baseline_mae', 0.0)),
+                    'Aantal testmetingen': int(next_cv_metrics.get('n_test', 0)),
+                },
+            }
+        except Exception as e:
+            res['next_lifestyle_error'] = str(e)
 
     # Train drop-off / activation model
     if train_dropoff_model:
@@ -998,6 +1113,8 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_dropoff = force_retrain_all or (model_name_to_retrain == 'dropoff')
             dropoff_model, X_test_dropoff, y_test_dropoff, features_dropoff, y_train_dropoff = train_dropoff_model(df, force_retrain=force_dropoff)
             y_pred_dropoff, y_pred_dropoff_proba = predict_binary_model(dropoff_model, X_test_dropoff)
+            if y_pred_dropoff is None or y_test_dropoff is None:
+                raise ValueError("Dropoff model returned no predictions")
             dropoff_cv_metrics = getattr(dropoff_model, "cv_metrics", None) or {}
             res['dropoff'] = {
                 'model': dropoff_model,
@@ -1023,6 +1140,8 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_improvement = force_retrain_all or (model_name_to_retrain == 'improvement')
             improvement_model, X_test_improvement, y_test_improvement, features_improvement, y_train_improvement = train_improvement_model(df, force_retrain=force_improvement)
             y_pred_improvement = improvement_model.predict(X_test_improvement)
+            if y_pred_improvement is None or y_test_improvement is None:
+                raise ValueError("Improvement model returned no predictions")
             improvement_cv_metrics = getattr(improvement_model, "cv_metrics", None) or {}
             res['improvement'] = {
                 'model': improvement_model,
@@ -1036,6 +1155,8 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
                     'RMSE': np.sqrt(mean_squared_error(y_test_improvement, y_pred_improvement)),
                     'R² Score': r2_score(y_test_improvement, y_pred_improvement),
                     'CV R² Score': float(improvement_cv_metrics.get('r2_mean', 0.0)),
+                    'CV MAE': float(improvement_cv_metrics.get('mae_mean', 0.0)),
+                    'Baseline MAE': float(improvement_cv_metrics.get('holdout_baseline_mae', 0.0)),
                 }
             }
         except Exception as e:
@@ -1047,6 +1168,8 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
             force_purchase = force_retrain_all or (model_name_to_retrain == 'purchase')
             purchase_model, X_test_purchase, y_test_purchase, features_purchase, y_train_purchase = train_purchase_model(df, force_retrain=force_purchase)
             y_pred_purchase, y_pred_purchase_proba = predict_binary_model(purchase_model, X_test_purchase)
+            if y_pred_purchase is None or y_test_purchase is None:
+                raise ValueError("Purchase model returned no predictions")
             purchase_cv_metrics = getattr(purchase_model, "cv_metrics", None) or {}
             res['purchase'] = {
                 'model': purchase_model,
@@ -1061,6 +1184,13 @@ def get_ml_models_v2(_cache_version: tuple[int, int], force_retrain_all: bool = 
                     'Recall Macro': recall_score(y_test_purchase, y_pred_purchase, average='macro', zero_division=0),
                     'CV Accuracy': float(purchase_cv_metrics.get('accuracy_mean', 0.0)),
                     'CV Recall Macro': float(purchase_cv_metrics.get('recall_macro_mean', 0.0)),
+                    'CV Average Precision': float(purchase_cv_metrics.get('average_precision_mean', 0.0)),
+                    'CV Brier': float(purchase_cv_metrics.get('brier_mean', 0.0)),
+                    'Holdout Average Precision': float(purchase_cv_metrics.get('holdout_average_precision', 0.0)),
+                    'Holdout Brier': float(purchase_cv_metrics.get('holdout_brier', 0.0)),
+                    'Precision': float(purchase_cv_metrics.get('holdout_precision', 0.0)),
+                    'Recall': float(purchase_cv_metrics.get('holdout_recall', 0.0)),
+                    'Decision threshold': float(purchase_cv_metrics.get('decision_threshold', 0.5)),
                 }
             }
         except Exception as e:
@@ -1119,10 +1249,11 @@ def p(fig, key: str | None = None, participants_df: pd.DataFrame | None = None,
     if participants_df is not None and not _heeft_genoeg_deelnemers(participants_df, min_deelnemers):
         return
     if fig is None:
-        return st.warning(t("Visualisatie kon niet worden gegenereerd wegens ontbrekende data."))
+        st.warning(t("Visualisatie kon niet worden gegenereerd wegens ontbrekende data."))
+        return
     try:
         fig_to_render = translate_plotly_figure(fig, st.session_state.get('lang', 'nl'))
-        config = {
+        config: dict[str, object] = {
             'displayModeBar': True,
             'responsive': True,
         }
@@ -1221,7 +1352,7 @@ def _dynamische_pc4_kaart(df: pd.DataFrame, kaart_key: str, titel: str, lang: st
         },
         'slaap_categorie_kaart.html': {
             'type': 'category', 'column': 'rec_ls_sleep_cat', 'label': tr('Slaapkwaliteit', lang),
-            'labels': {0: 'Goed', 1: 'Matig', 2: 'Slecht'}, 'colors': RISICO_COLORS,
+            'labels': categorie_labels('sleep'), 'colors': RISICO_COLORS,
         },
         'leeftijd_categorie_kaart.html': {
             'type': 'age', 'label': tr('Leeftijdscategorie', lang),
@@ -1244,7 +1375,8 @@ def _dynamische_pc4_kaart(df: pd.DataFrame, kaart_key: str, titel: str, lang: st
         },
         'werkvermogen_categorie_kaart.html': {
             'type': 'category', 'column': 'rec_asr_work_ability_cat', 'label': tr('Werkvermogen', lang),
-            'labels': {0: 'Laag', 1: 'Matig', 2: 'Goed'}, 'colors': RISICO_COLORS,
+            'labels': {0: 'Laag', 1: 'Matig', 2: 'Goed'},
+            'colors': {0: RISICO_COLORS[2], 1: RISICO_COLORS[1], 2: RISICO_COLORS[0]},
         },
     }
     spec = specs.get(kaart_key)
@@ -1263,10 +1395,10 @@ def _dynamische_pc4_kaart(df: pd.DataFrame, kaart_key: str, titel: str, lang: st
     else:
         work = df_map.copy()
         if spec['type'] == 'age':
-            age = pd.to_numeric(work.get('rec_age_current'), errors='coerce')
+            age = _numeric_column(work, 'rec_age_current')
             work['_cat'] = pd.cut(age, bins=[0, 30, 40, 50, 60, float('inf')], labels=[0, 1, 2, 3, 4], right=False)
         elif spec['type'] == 'steps_category':
-            steps = pd.to_numeric(work.get('rec_ls_exercise_steps_per_day'), errors='coerce')
+            steps = _numeric_column(work, 'rec_ls_exercise_steps_per_day')
             steps = np.where(steps < 1000, steps * 1000, steps)
             work['_cat'] = pd.cut(steps, bins=[-0.1, 5000, 10000, float('inf')], labels=[0, 1, 2], right=False)
         elif spec['type'] == 'median':
@@ -1415,9 +1547,9 @@ def lazy_load_demographic_breakdown(df: pd.DataFrame) -> pd.DataFrame:
     """
     if df.empty or 'rec_user_gender' not in df.columns:
         return pd.DataFrame()
-    
+
     gender_dist = df['rec_user_gender'].value_counts(normalize=True) * 100
-    return gender_dist.round(1)
+    return gender_dist.round(1).to_frame(name='percentage')
 
 
 @st.cache_data(ttl=CACHE_TTL_SECONDS['statistics'])
@@ -1642,7 +1774,7 @@ with st.sidebar:
 
     st.markdown("---")
 
-    pagina_opties = ["🏠 Overzicht", "🗺️ Kaarten", "📊 Variabelen verkenner", "🥗 Dieet & BMI", "📈 Longitudinale analyse", "🏢 Per opdrachtgever", "🛒 Producteffect", "📋 Vragenlijstgedrag", "🛍️ Kopersprofiel", "🔎 Snelle statistieken", "🔍 Datakwaliteit", "📉 Outlier analyse", "⚖️ T-toets man vs vrouw", "🔗 Correlaties", "🤖 ML Model"]
+    pagina_opties = ["🏠 Overzicht", "📊 Looker Studio", "🗺️ Kaarten", "📊 Variabelen verkenner", "🥗 Dieet & BMI", "📈 Longitudinale analyse", "🏢 Per opdrachtgever", "🛒 Producteffect", "📋 Vragenlijstgedrag", "🛍️ Kopersprofiel", "🔎 Snelle statistieken", "🔍 Datakwaliteit", "📉 Outlier analyse", "⚖️ T-toets man vs vrouw", "🔗 Correlaties", "🤖 ML Model"]
     # De Testpagina (experimentele visualisaties) is alleen zichtbaar voor admins.
     if is_admin():
         pagina_opties.append("🧪 Test")
@@ -1655,6 +1787,7 @@ with st.sidebar:
         {'pad': ['Overzicht', 'Leefstijl'], 'pagina': '🏠 Overzicht'},
         {'pad': ['Overzicht', 'Platformgroei'], 'pagina': '🏠 Overzicht'},
         {'pad': ['Overzicht', 'Artikelgebruik'], 'pagina': '🏠 Overzicht'},
+        {'pad': ['Looker Studio'], 'pagina': '📊 Looker Studio'},
         {'pad': ['Kaarten'], 'pagina': '🗺️ Kaarten'},
         {'pad': ['Variabelen verkenner'], 'pagina': '📊 Variabelen verkenner'},
         {'pad': ['Dieet & BMI', 'Verdeling dieetkwaliteit'], 'pagina': '🥗 Dieet & BMI'},
@@ -1812,19 +1945,30 @@ with st.sidebar:
 
     st.markdown("---")
     st.markdown(f"**{tr('Data Management', lang)}**")
-    if st.button(tr("🔄 Ververs data uit database", lang)):
-        with st.spinner(tr("Data aan het synchroniseren...", lang)):
-            try:
-                ingest_script = Path(__file__).resolve().parent / "data_ingestion.py"
-                result = subprocess.run([sys.executable, str(ingest_script)], capture_output=True, text=True)
-                if result.returncode == 0:
-                    st.cache_data.clear()
-                    st.success(tr("Data succesvol ververst!", lang))
-                    st.rerun()
-                else:
-                    st.error(f"Fout bij synchronisatie: {result.stderr}")
-            except Exception as e:
-                st.error(f"Systeemfout: {e}")
+    is_synthetic_source = DATA_SOURCE in {"csv", "sqlite"}
+    refresh_label = (
+        "🔄 Herlaad synthetische demo-data"
+        if is_synthetic_source
+        else "🔄 Ververs data uit database"
+    )
+    if st.button(tr(refresh_label, lang)):
+        if is_synthetic_source:
+            st.cache_data.clear()
+            st.success(tr("Synthetische demo-data opnieuw geladen.", lang))
+            st.rerun()
+        else:
+            with st.spinner(tr("Data aan het synchroniseren...", lang)):
+                try:
+                    ingest_script = Path(__file__).resolve().parent / "data_ingestion.py"
+                    result = subprocess.run([sys.executable, str(ingest_script)], capture_output=True, text=True)
+                    if result.returncode == 0:
+                        st.cache_data.clear()
+                        st.success(tr("Data succesvol ververst!", lang))
+                        st.rerun()
+                    else:
+                        st.error(f"Fout bij synchronisatie: {result.stderr}")
+                except Exception as e:
+                    st.error(f"Systeemfout: {e}")
 
     st.markdown("---")
 
@@ -1909,7 +2053,29 @@ with st.sidebar:
 # ═════════════════════════════════════════════════════════════════════════════
 # OVERZICHT
 # ═════════════════════════════════════════════════════════════════════════════
-if pagina == "🏠 Overzicht":
+if pagina == "📊 Looker Studio":
+    st.title("Looker Studio")
+    st.caption("Interactief Looker Studio-rapport")
+
+    embed_url = LOOKER_STUDIO_EMBED_URL.strip()
+    toegestane_looker_hosts = (
+        "https://lookerstudio.google.com/",
+        "https://datastudio.google.com/",
+    )
+    if not embed_url:
+        st.info(
+            "De Looker Studio-link is nog niet ingesteld. Voeg "
+            "LOOKER_STUDIO_EMBED_URL toe aan het .env-bestand en herstart het dashboard."
+        )
+    elif not embed_url.startswith(toegestane_looker_hosts):
+        st.error(
+            "Ongeldige Looker Studio-link. Gebruik de HTTPS-embedlink van "
+            "lookerstudio.google.com of datastudio.google.com."
+        )
+    else:
+        components.iframe(embed_url, height=900, scrolling=True)
+
+elif pagina == "🏠 Overzicht":
     st.title(tr("Smart Health — Wetenschappersdashboard", lang))
     geslacht_badge(geslacht)
     st.markdown(tr("Interactief overzicht van de PMO data van Smart Health.", lang))
@@ -2125,7 +2291,7 @@ elif pagina == "🥗 Dieet & BMI":
     st.title(tr("Dieet & BMI", lang))
     geslacht_badge(geslacht)
     st.caption(
-        t("Dieetkwaliteit is het gemiddelde van zes voedingsscores: fruit, groenten, suiker, verzadigd vet, alcohol en zout (0-5 schaal).")
+        t("Dieetkwaliteit is het gemiddelde van zes voedingsscores: fruit, groenten, suiker, verzadigd vet, alcohol en zout.")
     )
     st.markdown("---")
 
@@ -2146,7 +2312,7 @@ elif pagina == "🥗 Dieet & BMI":
 
     with tab4:
         st.subheader(t("Internationale vergelijking: Nederland vs Buitenland"))
-        st.caption(t("Vergelijking van gemiddelde scores tussen deelnemers in Nederland en daarbuiten op basis van postcode identificatie. Gemiddelden worden getoond met groepsgrootte (n); kleine groepen vragen om terughoudende interpretatie."))
+        st.caption(t("Vergelijk deelnemers in Nederland en daarbuiten. Elke variabele behoudt zijn eigen meeteenheid; BMI wordt apart getoond. Interpreteer kleine groepen voorzichtig."))
         
         df_int = voeg_dieet_score_toe(load_main_data_filtered_by_store())
         df_int = add_app_user_ids_and_addresses(df_int, DB_URL)
@@ -2172,119 +2338,106 @@ elif pagina == "🥗 Dieet & BMI":
         
         metrics_map = {
             'Leefstijlscore': 'rec_ls_lifestyle_score',
-            'Beweging': 'rec_ls_score_exercise',
-            'Dieet score': 'dieet_score'
+            'Bewegingsscore': 'rec_ls_score_exercise',
+            'Dieet score': 'dieet_score',
+            'Stress': 'rec_ls_stress_sum',
+            'Slaapkwaliteit': 'rec_ls_sleep_psqi_sum',
+            'Welzijn': 'rec_wellbeing_score',
+            'Veerkracht': 'rec_resilience_score',
+            'Hart-risico': 'rec_heartrisk',
         }
-        
         comp_data = []
         for label, col in metrics_map.items():
-            if col in df_int.columns:
-                df_int[col] = pd.to_numeric(df_int[col], errors='coerce')
-                df_metric = df_int.dropna(subset=[col]).copy()
-                if 'participant_id' in df_metric.columns:
-                    df_metric = (
-                        df_metric.groupby(['participant_id', 'regio'], as_index=False)
-                        .agg(metric_value=(col, 'mean'))
-                    )
-                    grouped = df_metric.groupby('regio').agg(
-                        Gemiddelde=('metric_value', 'mean'),
-                        n=('participant_id', 'nunique'),
-                    ).reset_index()
-                else:
-                    grouped = df_metric.groupby('regio').agg(
-                        Gemiddelde=(col, 'mean'),
-                        n=(col, 'count'),
-                    ).reset_index()
-                for _, row in grouped.iterrows():
-                    if pd.notna(row['Gemiddelde']):
-                        comp_data.append({
-                            'Metric': t(label),
-                            'Regio': t(row['regio']),
-                            'Gemiddelde': round(float(row['Gemiddelde']), 2),
-                            'n': int(row['n']),
-                        })
-        
-        df_comp = pd.DataFrame(comp_data)
-        
-        if not df_comp.empty:
-            c1, c2 = st.columns([2, 1])
-            with c1:
-                fig_int = px.bar(
-                    df_comp, x='Metric', y='Gemiddelde', color='Regio',
-                    barmode='group',
-                    color_discrete_map={t('Nederland'): '#E87722', t('Buitenland'): '#1F6FBF'},
-                    title=t("Internationale scorevergelijking (0-5 schaal)")
-                )
-                fig_int.update_traces(
-                    customdata=df_comp[['n']].values,
-                    hovertemplate=(
-                        '<b>%{x}</b><br>' +
-                        '%{fullData.name}: %{y:.2f}<br>' +
-                        'n: %{customdata[0]}<extra></extra>'
-                    )
-                )
-                if df_comp['n'].min() < MIN_VISUALISATIE_DEELNEMERS:
-                    st.info(t(
-                        "Visualisatie niet beschikbaar: elke groep heeft minimaal {min_n} deelnemers nodig.",
-                        min_n=MIN_VISUALISATIE_DEELNEMERS,
-                    ))
-                else:
-                    p(fig_int, participants_df=df_int)
-            with c2:
-                st.markdown(f"**{t('Details per regio')}**")
-                pivot_df = (
-                    df_comp.assign(waarde=df_comp.apply(lambda r: f"{r['Gemiddelde']:.2f} (n={int(r['n'])})", axis=1))
-                    .pivot(index='Metric', columns='Regio', values='waarde')
-                    .reset_index()
-                )
-                st.dataframe(translate_dataframe(pivot_df, lang), width="stretch", hide_index=True)
-                kleine_groepen = df_comp[df_comp['n'] < MIN_VISUALISATIE_DEELNEMERS]
-                if not kleine_groepen.empty:
-                    st.warning(t("Minstens één regiogroep heeft minder dan {min_n} deelnemers.", min_n=MIN_VISUALISATIE_DEELNEMERS))
+            if col not in df_int.columns:
+                continue
+            df_metric = df_int[['participant_id', 'regio', col]].copy()
+            df_metric[col] = pd.to_numeric(df_metric[col], errors='coerce')
+            df_metric = df_metric.dropna(subset=[col]).drop_duplicates(['participant_id', 'regio'])
+            grouped = df_metric.groupby('regio').agg(
+                Gemiddelde=(col, 'mean'),
+                n=('participant_id', 'nunique'),
+            ).reset_index()
+            for _, row in grouped.iterrows():
+                comp_data.append({
+                    'Metric': t(label),
+                    'Regio': t(row['regio']),
+                    'Gemiddelde': float(row['Gemiddelde']),
+                    'n': int(row['n']),
+                })
 
-            # BMI apart omdat de schaal anders is
-            st.markdown("---")
-            df_int['rec_med_bmi'] = pd.to_numeric(df_int['rec_med_bmi'], errors='coerce')
-            df_bmi = df_int.dropna(subset=['rec_med_bmi']).copy()
-            if 'participant_id' in df_bmi.columns:
-                df_bmi = (
-                    df_bmi.groupby(['participant_id', 'regio'], as_index=False)
-                    .agg(rec_med_bmi=('rec_med_bmi', 'mean'))
-                )
-                bmi_comp = df_bmi.groupby('regio').agg(
-                    rec_med_bmi=('rec_med_bmi', 'mean'),
-                    n=('participant_id', 'nunique'),
-                ).reset_index()
-            else:
-                bmi_comp = df_bmi.groupby('regio').agg(
-                    rec_med_bmi=('rec_med_bmi', 'mean'),
-                    n=('rec_med_bmi', 'count'),
-                ).reset_index()
-            bmi_comp['regio'] = bmi_comp['regio'].apply(t)
-            fig_bmi_int = px.bar(
-                bmi_comp, x='regio', y='rec_med_bmi', color='regio',
-                color_discrete_map={t('Nederland'): '#E87722', t('Buitenland'): '#1F6FBF'},
-                labels={'rec_med_bmi': 'Gemiddelde BMI', 'regio': t('Regio')},
-                title=t("BMI Vergelijking: Nederland vs Buitenland")
+        df_comp = pd.DataFrame(comp_data)
+        if not df_comp.empty:
+            metrics_met_beide_regios = (
+                df_comp.groupby('Metric')
+                .filter(lambda group: group['Regio'].nunique() >= 2 and (group['n'] > MIN_INTERNATIONALE_DEELNEMERS - 1).all())
+                ['Metric']
+                .unique()
             )
-            fig_bmi_int.update_traces(
-                customdata=bmi_comp[['n']].values,
-                hovertemplate=(
-                    '<b>%{x}</b><br>' +
-                    'BMI: %{y:.2f}<br>' +
-                    'n: %{customdata[0]}<extra></extra>'
-                )
-            )
-            fig_bmi_int.update_layout(showlegend=False)
-            if bmi_comp['n'].min() < MIN_VISUALISATIE_DEELNEMERS:
-                st.info(t(
-                    "Visualisatie niet beschikbaar: elke groep heeft minimaal {min_n} deelnemers nodig.",
-                    min_n=MIN_VISUALISATIE_DEELNEMERS,
-                ))
-            else:
-                p(fig_bmi_int, participants_df=df_bmi)
-        else:
+            df_comp = df_comp[df_comp['Metric'].isin(metrics_met_beide_regios)].copy()
+        if df_comp.empty or df_comp['Regio'].nunique() < 2:
             st.info(t("Onvoldoende data voor internationale vergelijking."))
+        else:
+            kleurkaart = {t('Nederland'): '#E87722', t('Buitenland'): '#1F6FBF'}
+            regio_counts = df_comp[['Regio', 'n']].drop_duplicates('Regio').set_index('Regio')['n']
+            k1, k2, k3 = st.columns(3)
+            k1.metric(t('Metrics vergeleken'), int(df_comp['Metric'].nunique()))
+            k2.metric(t('Deelnemers Nederland'), int(regio_counts.get(t('Nederland'), 0)))
+            k3.metric(t('Deelnemers buitenland'), int(regio_counts.get(t('Buitenland'), 0)))
+
+            kleine_groepen = regio_counts[regio_counts < MIN_INTERNATIONALE_DEELNEMERS]
+            if not kleine_groepen.empty:
+                st.warning(t("Minstens één regiogroep heeft minder dan {min_n} deelnemers.", min_n=MIN_INTERNATIONALE_DEELNEMERS))
+            else:
+                score_fig = px.bar(
+                    df_comp,
+                    x='Gemiddelde',
+                    y='Metric',
+                    color='Regio',
+                    barmode='group',
+                    orientation='h',
+                    text='Gemiddelde',
+                    color_discrete_map=kleurkaart,
+                    labels={'Gemiddelde': t('Gemiddelde waarde'), 'Metric': '', 'Regio': t('Regio')},
+                    title=t("Internationale variabelenvergelijking"),
+                )
+                score_fig.update_traces(texttemplate='%{text:.2f}', textposition='outside', cliponaxis=False)
+                score_fig.update_layout(
+                    height=max(420, 55 * int(df_comp['Metric'].nunique()) + 100),
+                    xaxis=dict(autorange=True),
+                    legend_title_text='',
+                )
+                p(score_fig, participants_df=df_int)
+
+            st.markdown(f"**{t('Details per regio')}**")
+            pivot_df = (
+                df_comp.assign(waarde=df_comp.apply(lambda row: f"{row['Gemiddelde']:.2f} (n={int(row['n'])})", axis=1))
+                .pivot(index='Metric', columns='Regio', values='waarde')
+                .reset_index()
+            )
+            st.dataframe(translate_dataframe(pivot_df, lang), width="stretch", hide_index=True)
+
+            df_bmi = df_int[['participant_id', 'regio', 'rec_med_bmi']].copy()
+            df_bmi['rec_med_bmi'] = pd.to_numeric(df_bmi['rec_med_bmi'], errors='coerce')
+            df_bmi = df_bmi.dropna(subset=['rec_med_bmi']).drop_duplicates(['participant_id', 'regio'])
+            bmi_comp = df_bmi.groupby('regio').agg(
+                Gemiddelde=('rec_med_bmi', 'mean'),
+                n=('participant_id', 'nunique'),
+            ).reset_index()
+            if bmi_comp['regio'].nunique() >= 2 and (bmi_comp['n'] > MIN_INTERNATIONALE_DEELNEMERS - 1).all():
+                bmi_comp['Regio'] = bmi_comp['regio'].apply(t)
+                bmi_fig = px.bar(
+                    bmi_comp,
+                    x='Regio',
+                    y='Gemiddelde',
+                    color='Regio',
+                    text='Gemiddelde',
+                    color_discrete_map=kleurkaart,
+                    labels={'Gemiddelde': t('Gemiddelde BMI'), 'Regio': ''},
+                    title=t("BMI vergelijking: Nederland vs Buitenland"),
+                )
+                bmi_fig.update_traces(texttemplate='%{text:.1f}', textposition='outside')
+                bmi_fig.update_layout(height=320, showlegend=False)
+                p(bmi_fig, participants_df=df_bmi)
 
 # ═════════════════════════════════════════════════════════════════════════════
 # LONGITUDINALE ANALYSE
@@ -2737,11 +2890,12 @@ elif pagina == "🏢 Per opdrachtgever":
                 t('Werkvermogen (WAI)'): 'rec_asr_work_ability_score',
                 t('Burn-out risico'): 'rec_asr_burn_out_score',
                 t('Werktevredenheid'): 'rec_asr_job_satisfaction_score',
-                t('Fruit score'): 'rec_ls_score_fruit',
-                t('Groenten score'): 'rec_ls_score_vegetables',
-                t('Suiker score'): 'rec_ls_score_sugar',
-                t('Vet score'): 'rec_ls_score_saturated_fat',
-                t('Zout score'): 'rec_ls_score_natrium',
+                t('Fruit (stuks/dag)'): 'rec_ls_score_fruit',
+                t('Groenten (gram/dag)'): 'rec_ls_score_vegetables',
+                t('Suiker (gram/dag)'): 'rec_ls_score_sugar',
+                t('Verzadigd vet (gram/dag)'): 'rec_ls_score_saturated_fat',
+                t('Natrium (mg/dag)'): 'rec_ls_score_natrium',
+                t('Beweegminuten (min/week)'): 'rec_ls_score_exercise',
             }
 
         indicator_keuze = st.selectbox(
@@ -2783,7 +2937,14 @@ elif pagina == "🏢 Per opdrachtgever":
             if waarschuwing:
                 st.warning(waarschuwing)
 
-            categorieen = [c for c in ('Hoog', 'Goed', 'Matig', 'Slecht', 'Laag') if cat_counts.get(c)]
+            if indicator_kolom in {'rec_med_bmi', 'rec_med_bmi_cat'}:
+                categorieen = [
+                    BMI_LABELS[code]
+                    for code in sorted(BMI_LABELS)
+                    if cat_counts.get(BMI_LABELS[code])
+                ]
+            else:
+                categorieen = [c for c in ('Hoog', 'Goed', 'Matig', 'Slecht', 'Laag') if cat_counts.get(c)]
             cols = st.columns(2 + len(categorieen))
             cols[0].metric(t("Opdrachtgevers getoond"), n_stores)
             cols[1].metric(f"Totaalgemiddelde {indicator_keuze}", f"{totaal_gem:.2f}")
@@ -3252,9 +3413,9 @@ elif pagina == "🔎 Snelle statistieken":
             t("Rookstatus"), [t("Alle"), t("Nooit gerookt"), t("Ex-roker"), t("Roker")], key="qs_roken"
         )
     with col4:
+        bmi_filter_labels = [BMI_LABELS[code] for code in sorted(BMI_LABELS)]
         bmi_filter = st.selectbox(
-            t("BMI categorie"), [t("Alle"), t("Ondergewicht"), t("Normaal"), t("Overgewicht"), t("Obesitas")],
-            key="qs_bmi"
+            t("BMI categorie"), [t("Alle"), *bmi_filter_labels], key="qs_bmi"
         )
 
     # ── Filtering toepassen ───────────────────────────────────────────────────
@@ -3272,9 +3433,9 @@ elif pagina == "🔎 Snelle statistieken":
 
     # Roken
     roken_map = {
-        t("Nooit gerookt"): [0],
-        t("Ex-roker"):      [1, 2, 3, 4],
-        t("Roker"):         [5, 6],
+        t("Nooit gerookt"): [1],
+        t("Ex-roker"):      [2],
+        t("Roker"):         [3],
     }
     if roken_filter != t("Alle"):
         roken = pd.to_numeric(
@@ -3283,12 +3444,7 @@ elif pagina == "🔎 Snelle statistieken":
         df = df[roken.isin(roken_map[roken_filter])]
 
     # BMI
-    bmi_map = {
-        t("Ondergewicht"): [-2, -1],
-        t("Normaal"):      [0],
-        t("Overgewicht"):  [1],
-        t("Obesitas"):     [2],
-    }
+    bmi_map = {label: [code] for code, label in BMI_LABELS.items()}
     if bmi_filter != t("Alle"):
         bmi = pd.to_numeric(df['rec_med_bmi_cat'], errors='coerce')
         df = df[bmi.isin(bmi_map[bmi_filter])]
@@ -3346,8 +3502,8 @@ elif pagina == "🔎 Snelle statistieken":
         roken_s = pd.to_numeric(
             df['rec_smoking_answer'].replace('None', pd.NA), errors='coerce'
         )
-        c1.metric("Rokers", f"{roken_s.ge(5).sum():,}",
-                  delta=f"{roken_s.ge(5).mean()*100:.1f}%", delta_color="off")
+        c1.metric("Rokers", f"{roken_s.eq(3).sum():,}",
+              delta=f"{roken_s.eq(3).mean()*100:.1f}%", delta_color="off")
 
         alcohol = pd.to_numeric(df['rec_ls_alcohol_total_per_week'], errors='coerce')
         c2.metric("Gem. alcohol/week", f"{alcohol.mean():.1f}")
@@ -3445,6 +3601,7 @@ elif pagina == "🤖 ML Model":
     ml_tab_names = []
     if maak_gebruikers_segmentatie_plot: ml_tab_names.append(t("👥 Gebruikerssegmentatie"))
     if 'lifestyle' in ml_data: ml_tab_names.append(t("🥗 Leefstijlmodel"))
+    if 'next_lifestyle' in ml_data: ml_tab_names.append(t("🔮 Volgende leefstijlscore"))
     if 'dropoff' in ml_data: ml_tab_names.append(t("📋 Afhaakmodel"))
     if 'improvement' in ml_data: ml_tab_names.append(t("📈 Verbeteringsmodel"))
     if 'purchase' in ml_data: ml_tab_names.append(t("🛒 Productmodel"))
@@ -3457,7 +3614,7 @@ elif pagina == "🤖 ML Model":
         col_d1.write(f"**ML Module:** {'✅ Geladen' if ML_AVAILABLE else '❌ Fout'}")
         if not ML_AVAILABLE: col_d1.error(ML_IMPORT_ERROR)
         
-        for key in ('lifestyle_error', 'dropoff_error', 'improvement_error', 'purchase_error', 'bp_error', 'heartrisk_error'):
+        for key in ('lifestyle_error', 'next_lifestyle_error', 'dropoff_error', 'improvement_error', 'purchase_error', 'bp_error', 'heartrisk_error'):
             if key in ml_data:
                 st.error(f"**{key.replace('_', ' ').title()}**: {ml_data[key]}")
 
@@ -3485,7 +3642,7 @@ elif pagina == "🤖 ML Model":
             st.subheader(t("Leefstijlscore Voorspelling"))
             st.write(
                 t(
-                    "Dit model onderzoekt in hoeverre omgevingsfactoren (werk, psychologie) en demografie de uiteindelijke leefstijlscore bepalen. "
+                    "Dit model voorspelt de leefstijlscore op basis van gezondheid, leefstijl, welzijn en demografie."
                 )
             )
             if st.button(t("🔄 Herlaad Leefstijlmodel"), key="refresh_lifestyle_model"):
@@ -3549,32 +3706,51 @@ elif pagina == "🤖 ML Model":
 
             st.markdown("---")
             st.markdown(f"### {t('Eigen invoer')}")
+            lifestyle_defaults = dict(getattr(ml_module, 'LIFESTYLE_INPUT_DEFAULTS', {}))
             c1, c2, c3 = st.columns(3)
             with c1:
-                in_age_ls = st.slider(t("Leeftijd"), 18, 85, 50, key="ml_ls_age")
+                in_age_ls = st.slider(t("Leeftijd"), 18, 85, int(lifestyle_defaults['rec_age_current']), key="ml_ls_age")
                 in_gender_ls = st.selectbox(t("Geslacht"), [t("Vrouw"), t("Man")], key="ml_ls_gender")
-                in_stress_ls = st.slider(t("Stress (0-10)"), 0.0, 10.0, 3.0, 0.1, key="ml_ls_stress")
-                in_res_ls = st.slider(t("Veerkracht"), 0.0, 10.0, 6.0, 0.1, key="ml_ls_res")
+                in_bmi_ls = st.slider(t("BMI"), 15.0, 45.0, lifestyle_defaults['rec_med_bmi'], 0.1, key="ml_ls_bmi")
+                in_stress_ls = st.slider(t("Stress (0-28)"), 0.0, 28.0, lifestyle_defaults['rec_ls_stress_sum'], 0.1, key="ml_ls_stress")
+                in_sleep_ls = st.slider(t("Slaap PSQI (0-21)"), 0.0, 21.0, lifestyle_defaults['rec_ls_sleep_psqi_sum'], 0.1, key="ml_ls_sleep")
+                in_steps_ls = st.slider(t("Beweging (duizend stappen/dag)"), 0.0, 25.0, lifestyle_defaults['rec_ls_exercise_steps_per_day'], 0.1, key="ml_ls_steps")
+                in_activity_minutes_ls = st.slider(t("Beweegminuten per week"), 0.0, 10080.0, lifestyle_defaults['rec_ls_exercise_physical_activity_minutes_total'], 10.0, key="ml_ls_activity_minutes")
             with c2:
-                in_work_ls = st.slider(t("Werkdruk"), 0.0, 10.0, 5.0, 0.1, key="ml_ls_work")
-                in_sat_ls = st.slider(t("Werktevredenheid"), 0.0, 10.0, 7.0, 0.1, key="ml_ls_sat")
-                in_att_ls = st.slider(t("Werkhouding"), 0.0, 10.0, 6.5, 0.1, key="ml_ls_att")
+                in_fruit_ls = st.slider(t("Fruit per dag"), 0.0, 10.0, lifestyle_defaults['rec_ls_nutrition_fruit_fruit_per_day'], 0.1, key="ml_ls_fruit")
+                in_vegetables_ls = st.slider(t("Groenten (gram/dag)"), 0.0, 1000.0, lifestyle_defaults['rec_ls_vegetables_gram_per_day'], 10.0, key="ml_ls_vegetables")
+                in_sugar_ls = st.slider(t("Suiker (gram/dag)"), 0.0, 200.0, lifestyle_defaults['rec_ls_nutrition_sugar_per_day'], 1.0, key="ml_ls_sugar")
+                in_saturated_fat_ls = st.slider(t("Verzadigd vet (gram/dag)"), 0.0, 100.0, lifestyle_defaults['rec_ls_nutrition_saturated_fat_per_day'], 1.0, key="ml_ls_saturated_fat")
+                in_natrium_ls = st.slider(t("Natrium (mg/dag)"), 0.0, 10000.0, lifestyle_defaults['rec_ls_nutrition_natrium_per_day'], 100.0, key="ml_ls_natrium")
+                in_alcohol_ls = st.slider(t("Alcohol per week"), 0.0, 60.0, lifestyle_defaults['rec_ls_alcohol_total_per_week'], 1.0, key="ml_ls_alcohol")
             with c3:
-                in_well_ls = st.slider(t("Welzijn"), 0.0, 10.0, 7.2, 0.1, key="ml_ls_well")
-                in_eff_ls = st.slider(t("Zelfeffectiviteit"), 0.0, 10.0, 6.8, 0.1, key="ml_ls_eff")
-                in_comp_ls = st.slider(t("Competenties"), 0.0, 10.0, 7.5, 0.1, key="ml_ls_comp")
+                in_smoking_ls = st.selectbox(
+                    t("Roken"),
+                    [(t("Onbekend"), 0.0), (t("Nooit gerookt"), 1.0), (t("Ex-roker"), 2.0), (t("Roker"), 3.0)],
+                    index=1,
+                    format_func=lambda option: option[0],
+                    key="ml_ls_smoking",
+                )[1]
+                in_res_ls = st.slider(t("Veerkracht"), 0.0, 10.0, lifestyle_defaults['rec_resilience_score'], 0.1, key="ml_ls_res")
+                in_well_ls = st.slider(t("Welzijn"), 0.0, 10.0, lifestyle_defaults['rec_wellbeing_score'], 0.1, key="ml_ls_well")
 
             ls_input = pd.DataFrame([{
                 'rec_age_current': in_age_ls,
                 'rec_user_gender': 1 if in_gender_ls == t("Man") else 0,
+                'rec_med_bmi': in_bmi_ls,
                 'rec_ls_stress_sum': in_stress_ls,
+                'rec_ls_sleep_psqi_sum': in_sleep_ls,
+                'rec_ls_exercise_steps_per_day': in_steps_ls,
+                'rec_ls_exercise_physical_activity_minutes_total': in_activity_minutes_ls,
+                'rec_ls_nutrition_fruit_fruit_per_day': in_fruit_ls,
+                'rec_ls_vegetables_gram_per_day': in_vegetables_ls,
+                'rec_ls_nutrition_sugar_per_day': in_sugar_ls,
+                'rec_ls_nutrition_saturated_fat_per_day': in_saturated_fat_ls,
+                'rec_ls_nutrition_natrium_per_day': in_natrium_ls,
+                'rec_ls_alcohol_total_per_week': in_alcohol_ls,
+                'rec_smoking_answer': in_smoking_ls,
                 'rec_resilience_score': in_res_ls,
-                'rec_asr_workload_score': in_work_ls,
-                'rec_asr_job_satisfaction_score': in_sat_ls,
-                'rec_asr_working_attitude_score': in_att_ls,
                 'rec_wellbeing_score': in_well_ls,
-                'rec_self_efficacy_score': in_eff_ls,
-                'rec_asr_personal_competences_score': in_comp_ls,
             }])
             
             ls_pred = predict_lifestyle(ls_data['model'], ls_input)[0]
@@ -3585,6 +3761,32 @@ elif pagina == "🤖 ML Model":
             if fig_shap_ls:
                 st.markdown(f"#### {t('Waarom deze score?')}")
                 p(fig_shap_ls, key="ml_ls_local_explanation")
+
+    # ── NEXT LIFESTYLE MODEL ──────────────────────────────────────────────────
+    if t("🔮 Volgende leefstijlscore") in tab_map:
+        with tab_map[t("🔮 Volgende leefstijlscore")]:
+            st.subheader(t("Voorspelling volgende leefstijlscore"))
+            st.write(t("Dit model voorspelt de eerstvolgende leefstijlscore op basis van eerdere metingen van dezelfde deelnemer."))
+            if st.button(t("🔄 Herlaad toekomstmodel"), key="refresh_next_lifestyle_model"):
+                get_ml_models_v2.clear()
+                st.session_state['model_to_retrain_single'] = 'next_lifestyle'
+                st.rerun()
+
+            data = ml_data['next_lifestyle']
+            metrics = data['metrics']
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric("MAE", f"{metrics['MAE']:.2f}")
+            c2.metric("RMSE", f"{metrics['RMSE']:.2f}")
+            c3.metric(t("R² Score"), f"{metrics['R² Score']:.2f}")
+            c4.metric(t("CV MAE"), f"{metrics['CV MAE']:.2f}")
+            st.caption(t("Baseline MAE (volgende score = huidige score): {mae:.2f}. Het model is pas nuttig als zijn MAE lager is.", mae=metrics['Baseline MAE']))
+            st.caption(t("Voor een derde meting gebruikt het model de score op meting 2 en de verandering tussen meting 1 en 2."))
+
+            col_a, col_b = st.columns(2)
+            with col_a:
+                p(plot_feature_importance(data['model'], data['features'], "Toekomstig leefstijlmodel"), key="ml_next_ls_importance")
+            with col_b:
+                p(plot_prediction_performance_regression(data['y_test'], data['y_pred']), key="ml_next_ls_performance")
 
     # ── DROP-OFF MODEL ────────────────────────────────────────────────────────
     if t("📋 Afhaakmodel") in tab_map:
@@ -3610,7 +3812,7 @@ elif pagina == "🤖 ML Model":
     if t("📈 Verbeteringsmodel") in tab_map:
         with tab_map[t("📈 Verbeteringsmodel")]:
             st.subheader(t("Voorspelling scoreverbetering"))
-            st.write(t("Dit model voorspelt de verandering tussen eerste en laatste historische leefstijlscore bij gebruikers met herhaalde metingen."))
+            st.write(t("Dit model voorspelt de scoreverandering naar de volgende leefstijlmeting op basis van huidige en eerdere leefstijlscores."))
             data = ml_data.get('improvement')
             metrics = data['metrics']
             c1, c2, c3, c4 = st.columns(4)
@@ -3618,7 +3820,7 @@ elif pagina == "🤖 ML Model":
             c2.metric("RMSE", f"{metrics['RMSE']:.2f}")
             c3.metric(t("R² Score"), f"{metrics['R² Score']:.2f}")
             c4.metric(t("CV R² Score"), f"{metrics['CV R² Score']:.2f}")
-            st.caption(t("Let op: dit gebruikt huidige profielkenmerken als voorspellers; interpreteer het als signaalmodel, niet als causaal bewijs."))
+            st.caption(t("Geen-verandering baseline MAE: {baseline:.2f}; CV MAE: {cv_mae:.2f}. Gebruik dit als signaal, niet als causaal bewijs.", baseline=metrics['Baseline MAE'], cv_mae=metrics['CV MAE']))
 
             col_a, col_b = st.columns(2)
             with col_a:
@@ -3630,15 +3832,15 @@ elif pagina == "🤖 ML Model":
     if t("🛒 Productmodel") in tab_map:
         with tab_map[t("🛒 Productmodel")]:
             st.subheader(t("Product- en aankoopmodel"))
-            st.write(t("Dit model voorspelt welke gebruikers een aankoop doen. Het ondersteunt producteffect-analyse, maar bewijst geen causaal effect."))
+            st.write(t("Dit model rangschikt gebruikers op basis van historische betaalde aankopen. Het ondersteunt propensity-analyse, maar bewijst geen toekomstige aankoop of causaal effect."))
             data = ml_data.get('purchase')
             metrics = data['metrics']
             c1, c2, c3, c4 = st.columns(4)
-            c1.metric(t("Accuracy"), f"{metrics['Accuracy']:.1%}")
-            c2.metric(t("Recall Macro"), f"{metrics['Recall Macro']:.1%}")
-            c3.metric(t("CV Accuracy"), f"{metrics['CV Accuracy']:.1%}")
-            c4.metric(t("CV Recall Macro"), f"{metrics['CV Recall Macro']:.1%}")
-            st.caption(t("Target: 1 = gebruiker met ten minste één niet-geannuleerde aankoop, 0 = geen aankoop gevonden."))
+            c1.metric(t("Average precision holdout"), f"{metrics['Holdout Average Precision']:.1%}")
+            c2.metric(t("Average precision CV"), f"{metrics['CV Average Precision']:.1%}")
+            c3.metric(t("Precision"), f"{metrics['Precision']:.1%}")
+            c4.metric(t("Recall"), f"{metrics['Recall']:.1%}")
+            st.caption(t("Brier-score: CV {cv:.3f}, holdout {holdout:.3f}; beslisdrempel {threshold:.3f}. Target: minstens één betaalde aankoop.", cv=metrics['CV Brier'], holdout=metrics['Holdout Brier'], threshold=metrics['Decision threshold']))
 
             col_a, col_b = st.columns(2)
             with col_a:
@@ -3649,11 +3851,11 @@ elif pagina == "🤖 ML Model":
     # ── BLOOD PRESSURE MODEL ──────────────────────────────────────────────────
     if t("🩸 Bloeddrukmodel") in tab_map:
         with tab_map[t("🩸 Bloeddrukmodel")]:
-            st.subheader(t("Bloeddruk Categorie Voorspelling"))
+            st.subheader(t("Verhoogde bloeddruk"))
             st.write(
                 t(
-                    "Dit model voorspelt of iemand een normale, verhoogde of hoge bloeddruk heeft "
-                    "op basis van demografie, BMI en leefstijlfactoren zoals zoutinname en beweging."
+                    "Dit model schat of bloeddruk mogelijk verhoogd is op basis van demografie, BMI en leefstijlfactoren. "
+                    "Het onderscheidt geen verhoogde van hoge bloeddruk en is geen medische diagnose."
                 )
             )
             if st.button(t("🔄 Herlaad Bloeddrukmodel"), key="refresh_bp_model"):
@@ -3670,12 +3872,21 @@ elif pagina == "🤖 ML Model":
                 st.stop()
             metrics_bp = bp_data['metrics']
 
-            col1, col2 = st.columns(2)
-            col1.metric(t("Accuracy"), f"{metrics_bp['Accuracy']:.1%}")
-            col2.metric(t("Recall Macro"), f"{metrics_bp['Recall Macro']:.1%}")
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric(t("Average precision holdout"), f"{metrics_bp['Average Precision']:.1%}")
+            col2.metric(t("Average precision CV"), f"{metrics_bp['CV Average Precision']:.1%}")
+            col3.metric(t("Precision"), f"{metrics_bp['Precision']:.1%}")
+            col4.metric(t("Recall"), f"{metrics_bp['Recall']:.1%}")
             st.caption(
-                t("CV (5-fold): Gemiddelde Accuracy {acc:.1%}, Recall {rec:.1%}.", 
-                  acc=metrics_bp.get('CV Accuracy', 0), rec=metrics_bp.get('CV Recall Macro', 0))
+                t("Brier-score: CV {cv:.3f}, holdout {holdout:.3f}; drempel {threshold:.3f}.",
+                  cv=metrics_bp['CV Brier'], holdout=metrics_bp['Brier'], threshold=metrics_bp['Decision threshold'])
+            )
+            st.caption(
+                t(
+                    "Screeningsinstelling: hoge recall; {rate:.1%} van de holdoutdeelnemers kreeg een signaal. "
+                    "Dit signaal is geen diagnose.",
+                    rate=metrics_bp['Alert rate'],
+                )
             )
 
             st.markdown("---")
@@ -3693,7 +3904,7 @@ elif pagina == "🤖 ML Model":
             st.markdown(f"### {t('Model Evaluatie')}")
             col_ev1, col_ev2, col_ev3 = st.columns(3)
             with col_ev1:
-                fig_cm_bp = plot_confusion_matrix(bp_data['y_test'], bp_data['y_pred'])
+                fig_cm_bp = plot_confusion_matrix(bp_data['y_test'], bp_data['y_pred'], labels=[0, 1])
                 p(fig_cm_bp, key="ml_bp_confusion")
             with col_ev2:
                 if plot_roc_curve:
@@ -3736,10 +3947,10 @@ elif pagina == "🤖 ML Model":
             
             bp_pred_class, _ = predict_bp(bp_data['model'], bp_input)
             bp_pred = bp_pred_class[0]
-            bp_labels = {0: "Normaal", 1: "Verhoogd", 2: "Hoog"}
+            bp_labels = {0: "Normaal", 1: "Verhoogd of hoog"}
             
             st.metric(
-                t("Voorspelde bloeddrukcategorie"),
+                t("Bloeddruksignaal"),
                 bp_labels[int(bp_pred)],
             )
             
@@ -3773,7 +3984,6 @@ elif pagina == "🤖 ML Model":
                 st.info(t("Hartrisicomodel kon niet worden getraind met de huidige data."))
                 st.stop()
             metrics_hr = hr_data['metrics']
-            threshold_scan_top = hr_data.get('threshold_scan_top', [])
 
             col1, col2, col3, col4 = st.columns(4)
             col1.metric(t("Accuracy"), f"{metrics_hr['Accuracy']:.3f}")
@@ -3792,34 +4002,9 @@ elif pagina == "🤖 ML Model":
             st.caption(
                 t("Macro recall (gemiddelde over alle 3 klassen): {value:.3f}.", value=metrics_hr['Recall macro'])
             )
-
-            with st.expander(t("Threshold scan"), expanded=False):
-                if threshold_scan_top:
-                    df_scan = pd.DataFrame(threshold_scan_top)
-                    # Keep the table compact: show thresholds + recall outcomes.
-                    cols = [
-                        "moderate_threshold",
-                        "high_threshold",
-                        "recall_moderate",
-                        "recall_high",
-                        "recall_low",
-                        "score",
-                    ]
-                    cols = [c for c in cols if c in df_scan.columns]
-                    st.dataframe(
-                        df_scan[cols].rename(columns={
-                            "moderate_threshold": "Moderate thr",
-                            "high_threshold": "High thr",
-                            "recall_moderate": "Recall moderate",
-                            "recall_high": "Recall high",
-                            "recall_low": "Recall low",
-                            "score": "Objective",
-                        }),
-                        width="stretch",
-                        hide_index=True,
-                    )
-                else:
-                    st.caption(t("Geen threshold-scanresultaten beschikbaar."))
+            st.caption(
+                t("Brier-score kans op hoog risico (holdout, lager is beter): {value:.3f}.", value=metrics_hr['Brier hoge risico'])
+            )
 
             st.markdown("---")
 
@@ -3849,22 +4034,19 @@ elif pagina == "🤖 ML Model":
 
             st.markdown("---")
             st.markdown(f"### {t('Eigen invoer')}")
-            c1, c2, c3 = st.columns(3)
+            c1, c2 = st.columns(2)
+            smoking_options = (
+                ["Nooit", "Ex-roker", "Roker"]
+                if lang == "nl"
+                else ["Never", "Former smoker", "Smoker"]
+            )
             with c1:
                 hr_age = st.slider("Leeftijd" if lang == "nl" else "Age", 18, 80, 55, key="ml_hr_age")
                 hr_gender = st.selectbox("Geslacht" if lang == "nl" else "Gender", ["Vrouw", "Man"] if lang == "nl" else ["Woman", "Man"], key="ml_hr_gender")
                 hr_bmi = st.slider("BMI", 16.0, 45.0, 27.0, 0.1, key="ml_hr_bmi")
-                hr_smoking = st.selectbox("Rookstatus" if lang == "nl" else "Smoking status", ["Nooit", "Ex-roker", "Roker"] if lang == "nl" else ["Never", "Former smoker", "Smoker"], key="ml_hr_smoking")
+                hr_smoking = st.selectbox("Rookstatus" if lang == "nl" else "Smoking status", smoking_options, key="ml_hr_smoking")
             with c2:
-                hr_bp = st.selectbox("Bloeddruk categorie" if lang == "nl" else "Blood pressure category", [0, 1, 2], key="ml_hr_bp")
-                hr_diabetes = st.selectbox("Diabetes categorie" if lang == "nl" else "Diabetes category", [0, 1, 2], key="ml_hr_diabetes")
-                hr_sleep = st.slider("Slaap PSQI", 0.0, 21.0, 6.0, 0.5, key="ml_hr_sleep")
-                hr_steps = st.slider("Stappen per dag" if lang == "nl" else "Steps per day", 0, 20000, 7000, 500, key="ml_hr_steps")
-            with c3:
-                hr_resilience = st.slider("Veerkracht" if lang == "nl" else "Resilience", 0.0, 10.0, 6.0, 0.1, key="ml_hr_res")
-                hr_stress = st.slider(t("Stress (0-10)"), 0.0, 10.0, 3.0, 0.1, key="ml_hr_stress")
-                hr_alc = st.slider(t("Alcohol (glazen/week)"), 0, 40, 7, 1, key="ml_hr_alc")
-                hr_veg = st.slider(t("Groenten (gram/dag)"), 0, 800, 250, 25, key="ml_hr_veg")
+                hr_diabetes = st.selectbox("Diabetes categorie" if lang == "nl" else "Diabetes category", [0, 2], key="ml_hr_diabetes")
                 hr_fat = st.slider(t("Verzadigd vet (g/dag)"), 0.0, 80.0, 20.0, 0.5, key="ml_hr_fat")
                 hr_sugar = st.slider(t("Suiker (g/dag)"), 0.0, 200.0, 60.0, 1.0, key="ml_hr_sugar")
                 hr_sodium = st.slider(t("Natrium (mg/dag)"), 0.0, 6000.0, 2400.0, 50.0, key="ml_hr_sodium")
@@ -3873,18 +4055,11 @@ elif pagina == "🤖 ML Model":
                 'rec_age_current': hr_age,
                 'rec_user_gender': 1 if hr_gender in ["Man"] else 0,
                 'rec_med_bmi': hr_bmi,
-                'rec_smoking_answer': 0 if hr_smoking in ["Nooit", "Never"] else (2 if hr_smoking in ["Ex-roker", "Former smoker"] else 6),
-                'rec_med_blood_pressure_cat': hr_bp,
+                'rec_smoking_cat': smoking_options.index(hr_smoking),
                 'rec_med_diabetes_cat': hr_diabetes,
-                'rec_ls_sleep_psqi_sum': hr_sleep,
-                'rec_ls_exercise_steps_per_day': hr_steps / 1000.0,
-                'rec_ls_stress_sum': hr_stress,
-                'rec_resilience_score': hr_resilience,
                 'rec_ls_nutrition_saturated_fat_per_day': hr_fat,
                 'rec_ls_nutrition_sugar_per_day': hr_sugar,
                 'rec_ls_nutrition_natrium_per_day': hr_sodium,
-                'rec_ls_alcohol_total_per_week': hr_alc,
-                'rec_ls_vegetables_gram_per_day': hr_veg,
             }])
             hr_pred_class, hr_pred_proba = predict_heartrisk(hr_data['model'], heartrisk_input)
             risico_labels = {
@@ -3939,43 +4114,31 @@ elif pagina == "🧪 Test":
                 df_long = df_long[pd.to_numeric(df_long['participant_id'], errors='coerce').isin(active_pids)]
 
         st.subheader(t("Transition Matrix: Verschuiving tussen risicogroepen"))
-        opties = sorted(list(VARIABELEN_DICT.keys()))
+        available_slugs = set(df_long['slug'].dropna().astype(str)) if 'slug' in df_long.columns else set()
+        opties = []
+        optie_specs = {}
+        gebruikte_slugs = set()
+        for label, var_spec in VARIABELEN_DICT.items():
+            slug = visualisaties._dashboard_score_to_history_slug(var_spec.get('kolom', ''))
+            if slug in visualisaties.RISICO_MIGRATIE_EXCLUDED_SLUGS:
+                continue
+            if slug in available_slugs and slug not in gebruikte_slugs:
+                opties.append(label)
+                optie_specs[label] = (label, var_spec)
+                gebruikte_slugs.add(slug)
         if not opties:
-            st.warning(t("Geen variabelen gevonden in het variabelenregister."))
+            st.warning(t("Geen variabelen met beschikbare longitudinale data gevonden."))
         else:
             factor_mig = st.selectbox(t("Kies factor voor migratie"), opties, key="test_m_factor")
-            var_spec = VARIABELEN_DICT.get(factor_mig, {})
+            _, var_spec = optie_specs[factor_mig]
             kolom = var_spec.get('kolom', '')
             try:
                 slug = visualisaties._dashboard_score_to_history_slug(kolom)
             except Exception:
                 slug = kolom
-
-            try:
-                available_slugs = sorted(df_long['slug'].dropna().astype(str).unique()) if 'slug' in df_long.columns else []
-                if slug not in available_slugs and available_slugs:
-                    tokens = set()
-                    if isinstance(kolom, str):
-                        tokens.update([t for t in kolom.lower().replace('_', ' ').split() if len(t) > 2])
-                    if isinstance(factor_mig, str):
-                        tokens.update([t for t in factor_mig.lower().replace('_', ' ').split() if len(t) > 2])
-
-                    candidate = None
-                    for s in available_slugs:
-                        s_low = s.lower()
-                        if any(tok in s_low for tok in tokens):
-                            candidate = s
-                            break
-                    if candidate is None:
-                        common_map = ['fruit', 'vegetables', 'bmi', 'stress', 'sleep', 'alcohol', 'sugar', 'fat', 'salt', 'blood_pressure', 'diabetes', 'exercise', 'smoking', 'wellbeing']
-                        for cm in common_map:
-                            if cm in available_slugs:
-                                candidate = cm
-                                break
-                    if candidate:
-                        slug = candidate
-            except Exception:
-                pass
+            if slug in visualisaties.RISICO_MIGRATIE_EXCLUDED_SLUGS:
+                st.info(t("Deze factor is tijdelijk uitgezet in de risicomigratie-visualisatie."))
+                st.stop()
 
             if 'labels' in var_spec and isinstance(var_spec['labels'], dict):
                 label_map = {k: v for k, v in var_spec['labels'].items()}
@@ -4236,9 +4399,41 @@ elif pagina == "🧪 Test":
                 if agg.empty:
                     st.warning(t("Geen engagementdata beschikbaar. Controleer opdrachtgeverkoppelingen."))
                 else:
-                    c1, c2 = st.columns(2)
-                    c1.metric(t("Opdrachtgevers"), f"{len(agg):,}")
-                    c2.metric(t("Benchmark (gewogen)"), f"{benchmark:.1f}")
+                    summary = build_engagement_summary_stats(agg, benchmark, lang=lang)
+                    c1, c2, c3, c4 = st.columns(4)
+                    c1.metric(t("Beste opdrachtgever"), summary['beste_opdrachtgever'], delta=f"{summary['top_delta']:+.1f}")
+                    c2.metric(t("Benchmark"), f"{summary['benchmark']:.1f}")
+                    c3.metric(t("Gemiddeld"), f"{summary['gemiddeld_score']:.1f}")
+                    c4.metric(t("Boven benchmark"), f"{summary['boven_benchmark']}/{len(agg):,}")
+                    st.info(summary['insight'])
+
+                    with st.expander(t("Datakwaliteit en koppelingen"), expanded=False):
+                        kwaliteit = koppeling.copy()
+                        if not kwaliteit.empty:
+                            kwaliteit['Status'] = kwaliteit.apply(
+                                lambda r: (
+                                    'Volledig' if r.get('Beschikbaar', 0) == r.get('Koppelbaar', 0) and r.get('Beschikbaar', 0) > 0
+                                    else 'Gedeeltelijk' if r.get('Koppelbaar', 0) > 0
+                                    else 'Niet beschikbaar'
+                                ),
+                                axis=1,
+                            )
+                            st.dataframe(
+                                translate_dataframe(kwaliteit, lang),
+                                width="stretch",
+                                hide_index=True,
+                            )
+                            st.caption(t(
+                                "Gedeeltelijk betekent dat de bron wel bestaat, maar niet alle gebruikers betrouwbaar "
+                                "aan een deelnemer kunnen worden gekoppeld."
+                            ))
+
+                    with st.expander(t("Hoe lees je deze score?"), expanded=False):
+                        st.markdown(
+                            "- " + t("De score loopt van 0 tot 100 en is een gewogen samenvatting van activiteit, herhaling, inhoudsgebruik en aankopen.") + "\n"
+                            "- " + t("Benchmark = gewogen gemiddelde over alle opdrachtgevers in deze selectie.") + "\n"
+                            "- " + t("Een hoger aandeel betekent dat meer deelnemers de activiteit minimaal één keer hebben gedaan.")
+                        )
 
                     with st.expander(t("Datakwaliteit en koppelingen"), expanded=False):
                         kwaliteit = koppeling.copy()
@@ -4276,7 +4471,6 @@ elif pagina == "🧪 Test":
                         p(fig_rank, min_deelnemers=0, key="test_eng_rank")
                         display_agg = agg.copy()
                         display_agg['vs_benchmark'] = (display_agg['engagement_score'] - benchmark).round(1)
-                        # Kolommen defensief selecteren (cache kan oudere aggregatie bevatten)
                         basis_renames = {
                             'store_name': t('Opdrachtgever'),
                             'engagement_score': t('Engagement'),
@@ -4302,6 +4496,7 @@ elif pagina == "🧪 Test":
                             if k in display_agg.columns:
                                 basis_renames[k] = lbl
                                 select_cols.append(k)
+                        st.caption(t("Belangrijkste KPI’s per opdrachtgever; meer details zijn hieronder beschikbaar."))
                         st.dataframe(
                             translate_dataframe(
                                 display_agg[select_cols].rename(columns=basis_renames),
@@ -4310,6 +4505,21 @@ elif pagina == "🧪 Test":
                             width="stretch",
                             hide_index=True,
                         )
+                        with st.expander(t("Meer details per opdrachtgever"), expanded=False):
+                            overige_renames = {
+                                'gem_invullingen': t('Gem. invullingen p.p.'),
+                                'gem_artikelviews': t('Gem. artikelviews p.p.'),
+                                'gem_aankopen': t('Gem. geldige aankopen p.p.'),
+                            }
+                            detail_cols = [c for c in display_agg.columns if c not in {'store_name', 'engagement_score', 'vs_benchmark', 'n_deelnemers'}]
+                            st.dataframe(
+                                translate_dataframe(
+                                    display_agg[['store_name'] + detail_cols].rename(columns={**basis_renames, **overige_renames}),
+                                    lang,
+                                ),
+                                width="stretch",
+                                hide_index=True,
+                            )
 
                     with eng_breakdown:
                         st.caption(t(
@@ -4319,7 +4529,7 @@ elif pagina == "🧪 Test":
                         ))
                         st.caption(t(
                             "Extra maten: Challenge afgerond = aandeel afgeronde van alle uitgekomen challenge-"
-                            "deelnames (expired/unsubscribed tellen als niet afgerond); Herhaalkoper = percentage "
+                            "runs (expired/unsubscribed tellen als niet afgerond); Herhaalkoper = percentage "
                             "kopers met minstens twee betaalde bestellingen; App actief = minstens één login in de "
                             "laatste 90 dagen."
                         ))

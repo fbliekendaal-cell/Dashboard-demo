@@ -1,22 +1,22 @@
 """
-Genereert alle vier HTML kaarten met consistente stijl en ingebouwde legenda.
-Uitvoeren: python3 /Users/bliekendaal/Desktop/Code/kaarten.py
+Genereert de HTML-kaarten met consistente stijl en ingebouwde legenda.
+Uitvoeren vanuit de demo-map: python kaarten.py
 """
 import pandas as pd
 import folium
 import json
-import sys
 import shapely.ops
 from shapely.geometry import shape, mapping
 from branca.colormap import linear
 from collections import defaultdict
 from pathlib import Path
 
-BASE     = Path('/Users/bliekendaal/Desktop/Code')
-HTML_MAP = BASE / 'HTML'
-HTML_MAP.mkdir(exist_ok=True)
+from config import CODE_DIR, HTML_DIR, DB_URL
+from data_ingestion import load_table_from_database
 
-sys.path.append(str(BASE))
+BASE = CODE_DIR
+HTML_MAP = HTML_DIR
+HTML_MAP.mkdir(parents=True, exist_ok=True)
 from kleuren import (
     RISICO_COLORS, HEARTRISK_LABELS, BMI_LABELS, BMI_COLORS, STRESS_LABELS,
     KAART_STIJL, GENDER_COLORS, GENDER_LABELS, LEEFTIJD_LABELS, LEEFTIJD_COLORS
@@ -230,13 +230,28 @@ def maak_continue_pc3_kaart(
 
 
 # ── Data laden ────────────────────────────────────────────────────────────────
-df = pd.read_parquet(BASE / 'users_met_scores.parquet')
+df = load_table_from_database('users_met_scores', DB_URL)
+if df.empty:
+    raise RuntimeError("De tabel users_met_scores bevat geen data voor de kaartgeneratie.")
 # Houd per gebruiker één rij aan, consistent met het dashboard.
-df = df.drop_duplicates(subset='user_id', keep='first').reset_index(drop=True)
+if 'user_id' in df.columns:
+    df = df.drop_duplicates(subset='user_id', keep='first').reset_index(drop=True)
+if 'postal_code' not in df.columns:
+    raise KeyError("users_met_scores mist de kolom postal_code voor kaartgeneratie.")
 df['pc4'] = df['postal_code'].dropna().astype(str).str.extract(r'(\d{4})')[0]
 df['pc3'] = df['pc4'].str[:3]
 nl_mask   = df['pc4'].notna() & (df['pc4'].str.len() == 4)
 df_nl     = df[nl_mask].copy()
+if 'rec_med_age_cat' not in df_nl.columns and 'rec_age_current' in df_nl.columns:
+    age = pd.to_numeric(df_nl['rec_age_current'], errors='coerce')
+    df_nl['rec_med_age_cat'] = pd.Series(
+        pd.NA,
+        index=df_nl.index,
+        dtype='Int64',
+    )
+    df_nl.loc[age < 40, 'rec_med_age_cat'] = 0
+    df_nl.loc[age.between(40, 55, inclusive='both'), 'rec_med_age_cat'] = 1
+    df_nl.loc[age > 55, 'rec_med_age_cat'] = 2
 
 
 # ══════════════════════════════════════════════════════════════════════════════

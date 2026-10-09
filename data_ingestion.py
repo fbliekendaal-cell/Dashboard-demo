@@ -6,6 +6,7 @@ import logging
 import sys # Keep sys import as it's used for path manipulation in some contexts
 from config import DB_URL, DB_URL_POSTGRES, DB_URL_SMART_HEALTH, CSV_DATA_DIR, DATA_SOURCE
 from account_filtering import filter_interne_accounts
+from categorieen import leid_categorie_af
 # Lokale instellingen
 CODE_DIR = Path(__file__).resolve().parent
 
@@ -14,77 +15,24 @@ CODE_DIR = Path(__file__).resolve().parent
 
 
 def _derive_bmi_category(series: pd.Series) -> pd.Series:
-    """Derive the five BMI bands used by latest_scores."""
-    bmi = pd.to_numeric(series, errors='coerce')
-    return pd.Series(
-        np.select(
-            [bmi >= 30, bmi >= 25, bmi >= 18.5, bmi >= 16],
-            [2, 1, 0, -1],
-            default=-2,
-        ),
-        index=series.index,
-    ).where(bmi.notna())
+    """Derive the five BMI bands used by the dashboard."""
+    return leid_categorie_af(series, 'bmi')
 
 
 def _derive_stress_category(series: pd.Series) -> pd.Series:
     """Derive stress bands from the 0-28 source scale."""
-    stress = pd.to_numeric(series, errors='coerce')
-    return pd.Series(
-        np.select([stress >= 16, stress >= 11], [2, 1], default=0),
-        index=series.index,
-    ).where(stress.notna())
+    return leid_categorie_af(series, 'stress')
 
 
 def _derive_sleep_category(series: pd.Series) -> pd.Series:
     """Derive PSQI bands used by latest_scores: 0-6, 7-14, 15-20."""
-    sleep = pd.to_numeric(series, errors='coerce')
-    return pd.Series(
-        np.select([sleep > 14, sleep > 6], [2, 1], default=0),
-        index=series.index,
-    ).where(sleep.notna())
+    return leid_categorie_af(series, 'sleep')
 
 
-def _normalize_lifestyle_component_to_1_10(series: pd.Series) -> pd.Series:
-    """Normalize a lifestyle sub-score to the intended 1..10 range."""
-    s = pd.to_numeric(series, errors='coerce')
-    if s.empty or s.notna().sum() == 0:
-        return s
-
-    low = s.quantile(0.05)
-    high = s.quantile(0.95)
-
-    # Fall back to a simple 0..max normalization if the distribution is degenerate.
-    if pd.isna(low) or pd.isna(high) or high <= low:
-        max_value = s.max()
-        if pd.isna(max_value) or max_value <= 0:
-            return s
-        return 1.0 + 9.0 * (s / max_value).clip(0, 1)
-
-    scaled = (s - low) / (high - low)
-    return 1.0 + 9.0 * scaled.clip(0, 1)
-
-
-def _compute_lifestyle_score(
-    df: pd.DataFrame,
-    normalize_components: bool = False,
-) -> pd.Series:
-    """Bereken de leefstijlscore uit componenten op hun oorspronkelijke schaal.
-
-    Normaliseren naar 1..10 is alleen beschikbaar voor een expliciete aanroep;
-    de reguliere datalader verandert bronwaarden niet meer op basis van de
-    verdeling in de geladen dataset.
-    """
-    score_cols = [col for col in df.columns if col.startswith('rec_ls_score_')]
-    if not score_cols:
-        return pd.Series(pd.NA, index=df.index, dtype='Float64')
-
-    score_frame = df[score_cols].apply(pd.to_numeric, errors='coerce')
-    if normalize_components:
-        score_frame = score_frame.apply(_normalize_lifestyle_component_to_1_10)
-    return score_frame.mean(axis=1)
 def _load_table_from_database_always(table_name: str, code_dir: Path) -> pd.DataFrame:
     """Always load from database, ignore local parquet files."""
     return load_table_from_database(table_name, DB_URL)
+
 
 def load_table_from_database(table_name: str, db_url: str) -> pd.DataFrame:
     """Laadt een tabel direct uit de database, accepteert een URL of een engine."""
@@ -299,10 +247,6 @@ def generate_consolidated_scores_in_db(db_url: str) -> tuple[bool, str]: # Chang
             df_consolidated['latest_completion_at'] = pd.NaT # Ensure column exists even if empty
         # Dedupliceer op user_id zonder types te forceren (om strings te ondersteunen)
         df_consolidated = df_consolidated.dropna(subset=['user_id']).drop_duplicates(subset='user_id', keep='last')
-
-        # 8. Bereken 'rec_ls_lifestyle_score' indien nodig
-        if df_consolidated['rec_ls_lifestyle_score'].isna().all():
-            df_consolidated['rec_ls_lifestyle_score'] = _compute_lifestyle_score(df_consolidated)
 
         # 9. Opslaan naar database
         from data_integration import DataIntegrator
@@ -588,16 +532,10 @@ def load_my_clic_participants_expanded(db_url: str) -> pd.DataFrame:
         if 'rec_user_gender' in df.columns:
             df['rec_user_gender'] = _normalize_gender_series(df['rec_user_gender'])
 
-        # Recalculate the lifestyle score from the raw sub-scores every time so the
-        # dashboard uses the intended 1..10 scale rather than stale/raw values.
-        if 'rec_ls_lifestyle_score' in df.columns or any(c.startswith('rec_ls_score_') for c in df.columns):
-            df['rec_ls_lifestyle_score'] = _compute_lifestyle_score(df)
+        # Keep the value from the data source; dashboard views show the stored scale.
     
-    # Ensure 'rec_ls_lifestyle_score' is present, even if it's just a placeholder for now
-    if 'rec_ls_lifestyle_score' not in df.columns or df['rec_ls_lifestyle_score'].isna().all():
-        df['rec_ls_lifestyle_score'] = _compute_lifestyle_score(df)
-        if df['rec_ls_lifestyle_score'].isna().all():
-            df['rec_ls_lifestyle_score'] = pd.NA
+    if 'rec_ls_lifestyle_score' not in df.columns:
+        df['rec_ls_lifestyle_score'] = pd.NA
 
     return df
 
@@ -620,7 +558,7 @@ def get_user_purchases(base_pad=None, db_url: str = DB_URL) -> pd.DataFrame:
     Maps app user_id to QE participant_id through smart_health.my_clic_participants,
     so buyer visualisations can compare purchases against questionnaire scores.
     """
-    if db_url:
+    if db_url and not str(db_url).startswith('sqlite'):
         try:
             engine = create_engine(db_url)
             query = text("""
@@ -655,32 +593,52 @@ def get_user_purchases(base_pad=None, db_url: str = DB_URL) -> pd.DataFrame:
 
     df_orders = load_table_from_database("orders", db_url)
     df_products = load_table_from_database("products", db_url)
-    
-    if df_orders.empty or df_products.empty: # Check if either is empty
+
+    if df_orders.empty or df_products.empty:
         logging.warning("Orders or products table is empty - no purchase data available")
         return pd.DataFrame(columns=['participant_id', 'user_id', 'status', 'created_at', 'name'])
-    
+
     # Ensure numeric columns for join
     df_orders['product_id'] = pd.to_numeric(df_orders['product_id'], errors='coerce')
     df_products['id'] = pd.to_numeric(df_products['id'], errors='coerce')
-    
+
     # Merge orders with products
     df_purchases = df_orders.merge(
-        df_products[['id', 'name']], 
-        left_on='product_id', 
-        right_on='id', 
-        how='left', 
+        df_products[['id', 'name']],
+        left_on='product_id',
+        right_on='id',
+        how='left',
         suffixes=('_order', '_product')
     )
-    
-    # Ensure required columns are present
+
+    if 'participant_id' not in df_purchases.columns or df_purchases['participant_id'].isna().any():
+        df_my_clic = load_table_from_database('my_clic_participants', db_url)
+        df_participants = load_table_from_database('participants', db_url)
+        bridge_columns = {'user_id', 'qe_participant_id'}
+        if bridge_columns.issubset(df_my_clic.columns) and {'id', 'public_id'}.issubset(df_participants.columns):
+            bridge = df_my_clic[['user_id', 'qe_participant_id']].dropna().drop_duplicates('user_id')
+            participants_map = df_participants[['id', 'public_id']].dropna().drop_duplicates('public_id')
+            bridge = bridge.merge(
+                participants_map,
+                left_on='qe_participant_id',
+                right_on='public_id',
+                how='left',
+            )
+            bridge = bridge.rename(columns={'id': 'participant_id'})[['user_id', 'participant_id']]
+            df_purchases = df_purchases.drop(columns=['participant_id'], errors='ignore').merge(
+                bridge,
+                on='user_id',
+                how='left',
+            )
+
+    # Use participant_id from orders table if present (synthetic data stores it directly).
+    # Fall back to pd.NA only when the column is genuinely absent.
     for col in ['participant_id', 'status', 'created_at', 'name']:
         if col not in df_purchases.columns:
-            if col == 'participant_id':
-                df_purchases[col] = pd.NA  # Mark as unavailable
-            else:
-                df_purchases[col] = pd.NA
-    
+            df_purchases[col] = pd.NA
+        elif col == 'participant_id':
+            df_purchases[col] = pd.to_numeric(df_purchases[col], errors='coerce')
+
     return df_purchases[['participant_id', 'user_id', 'status', 'created_at', 'name']]
 
 def add_app_user_ids_and_addresses(df: pd.DataFrame, db_url: str | None = None) -> pd.DataFrame:
@@ -1010,13 +968,10 @@ def load_participants_with_factor_scores(db_url: str) -> pd.DataFrame:
                 default=0
             )
 
-        # Koppel legacy aliases en bereken leefstijlscore
+        # Koppel legacy aliases zonder ruwe waarden tot een leefstijlscore te combineren.
         for source_col, alias_col in alias_map.items():
             if source_col in df_wide.columns and alias_col not in df_wide.columns:
                 df_wide[alias_col] = df_wide[source_col]
-
-        if 'rec_ls_lifestyle_score' not in df_wide.columns or df_wide['rec_ls_lifestyle_score'].isna().all():
-            df_wide['rec_ls_lifestyle_score'] = _compute_lifestyle_score(df_wide)
 
         for col in [
             'rec_user_gender', 'rec_age_current', 'rec_ls_lifestyle_score', 'rec_heartrisk_cat',

@@ -1,4 +1,7 @@
 from pathlib import Path
+from collections.abc import Sequence
+import re
+from typing import Any
 import pandas as pd
 import numpy as np
 import streamlit as st
@@ -8,12 +11,12 @@ import plotly.graph_objects as go
 import plotly.io as pio
 from plotly.subplots import make_subplots
 import logging
-from helpers import get_numeric_clean, filter_by_gender, normalize_to_scale
+from helpers import get_numeric_clean, filter_by_gender
 
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.exc import SQLAlchemyError
 from scipy import stats
-from config import DB_URL
+from config import DB_URL, DATA_SOURCE
 from data_ingestion import (
     generate_consolidated_scores_in_db,
     load_table_from_database,
@@ -32,6 +35,15 @@ from data_ingestion import (
 from helpers import _maak_net_label
 from account_filtering import filter_interne_accounts, interne_email_mask
 logger = logging.getLogger(__name__)
+
+ParticipantIds = Sequence[int] | set[int] | pd.Series | None
+
+
+def _numeric_column(df: pd.DataFrame, column: str, default: float = 0.0) -> pd.Series:
+    """Return a numeric column, using a correctly indexed fallback when absent."""
+    if column not in df.columns:
+        return pd.Series(default, index=df.index, dtype='float64')
+    return pd.to_numeric(df[column], errors='coerce')
 
 # Import variabelen EENMALIG hier, niet in functies!
 try:
@@ -80,6 +92,7 @@ from kleuren import (
     BMI_LABELS, BMI_COLORS,
 )
 from i18n import tr
+from categorieen import CATEGORIEEN, leid_categorie_af
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -91,6 +104,120 @@ def _empty_plot(message: str, height: int = 400) -> go.Figure:
         font=dict(size=14, color='gray'),
     )
     fig.update_layout(template='plotly_white', height=height)
+    return fig
+
+
+def _geslacht_labels(lang: str) -> dict[int, str]:
+    return {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
+
+
+def _maak_percentage_bar_fig(
+    counts: pd.DataFrame,
+    x_col: str,
+    y_col: str,
+    title: str,
+    *,
+    x_label: str = '',
+    y_label: str = '',
+    color_col: str | None = None,
+    color_discrete_map: dict | None = None,
+    category_order: list[str] | None = None,
+) -> go.Figure:
+    """Maak een vaste percentage-barplot zonder duplicatie in plot-configuratie."""
+    plot_kwargs: dict[str, Any] = {
+        'x': x_col,
+        'y': y_col,
+        'labels': {x_col: x_label, y_col: y_label},
+        'title': title,
+    }
+    if color_col is not None:
+        plot_kwargs['color'] = color_col
+        plot_kwargs['color_discrete_map'] = color_discrete_map or {}
+    else:
+        plot_kwargs['color_discrete_sequence'] = [HOOFD_KLEUR]
+
+    if category_order is not None:
+        plot_kwargs['category_orders'] = {x_col: category_order}
+
+    fig = px.bar(counts, **plot_kwargs)
+    fig.update_layout(showlegend=False)
+    return fig
+
+
+def _maak_kategorie_verdeling_fig(
+    df: pd.DataFrame,
+    kolom: str,
+    label_map: dict,
+    volgorde: list[str],
+    leeg_tekst: str,
+    titel_enkel: str,
+    titel_gesplitst: str,
+    lang: str,
+    geslacht: str = 'beide',
+    kleur_map: dict | None = None,
+    geslacht_kleur_map: dict | None = None,
+    geslacht_kolom: str = 'rec_user_gender',
+    waarde_kolom: str = 'percentage',
+    x_naam: str = '',
+    y_naam: str = str(None),
+) -> go.Figure:
+    """Generieke barplot voor numerieke categorieën, met of zonder splitsing per geslacht."""
+    if kolom not in df.columns:
+        return _empty_plot(leeg_tekst)
+
+    df2 = df.copy()
+    df2['categorie_code'] = pd.to_numeric(df2[kolom], errors='coerce')
+    df2 = df2.dropna(subset=['categorie_code'])
+    if df2.empty:
+        return _empty_plot(leeg_tekst)
+
+    if geslacht == 'beide' and geslacht_kolom in df2.columns:
+        gender_labels = _geslacht_labels(lang)
+        df2['geslacht_label'] = pd.to_numeric(df2[geslacht_kolom], errors='coerce').map(gender_labels)
+        df2 = df2.dropna(subset=['geslacht_label'])
+        if df2.empty:
+            return _empty_plot(leeg_tekst)
+
+        counts = (
+            df2.groupby(['geslacht_label', 'categorie_code'], observed=True)
+            .size()
+            .reset_index(name='aantal')
+        )
+        totals = counts.groupby('geslacht_label')['aantal'].transform('sum')
+        counts['percentage'] = counts['aantal'] / totals * 100
+        counts['label'] = counts['categorie_code'].map({code: label_map[code] for code in label_map})
+
+        fig = go.Figure()
+        for code, gender_name in ((1, gender_labels[1]), (0, gender_labels[0])):
+            subset = counts[counts['geslacht_label'] == gender_name].set_index('label').reindex(volgorde).fillna(0)
+            fig.add_trace(go.Bar(
+                x=subset.index,
+                y=subset[waarde_kolom],
+                name=gender_name,
+                marker_color=(geslacht_kleur_map or {}).get(code, HOOFD_KLEUR),
+            ))
+        fig.update_layout(
+            barmode='group',
+            legend_title_text=tr('Geslacht', lang),
+            title=titel_gesplitst,
+            xaxis_title=x_naam,
+            yaxis_title=y_naam or tr('Percentage (%)', lang),
+        )
+        return fig
+
+    counts = _tel_percentages(df2['categorie_code'], label_map)
+    kleur_map = kleur_map or {label_map[k]: HOOFD_KLEUR for k in label_map}
+    fig = px.bar(
+        counts,
+        x='label',
+        y=waarde_kolom,
+        color='label',
+        color_discrete_map={label_map[k]: kleur_map.get(k, HOOFD_KLEUR) for k in label_map},
+        labels={'label': x_naam, 'percentage': y_naam or tr('Percentage (%)', lang)},
+        title=titel_enkel,
+        category_orders={'label': volgorde},
+    )
+    fig.update_layout(showlegend=False)
     return fig
 
 
@@ -147,7 +274,7 @@ def _laad_actieve_stores(base_pad: Path, include_deleted: bool = True) -> pd.Dat
         stores_df['name'] = 'Onbekend'
     stores_df['id'] = pd.to_numeric(stores_df['id'], errors='coerce')
     if not include_deleted and 'deleted_at' in stores_df.columns:
-        stores_df['deleted_at'] = stores_df['deleted_at'].replace({'NULL': pd.NA, 'None': pd.NA, '': pd.NA})
+        stores_df['deleted_at'] = stores_df['deleted_at'].replace(['NULL', 'None', ''], pd.NA)
         stores_df = stores_df[stores_df['deleted_at'].isna()].copy()
     if not include_deleted and 'is_active' in stores_df.columns:
         actieve_mask = ~stores_df['is_active'].astype(str).str.strip().str.lower().isin({'0', 'false', 'nan', 'none'})
@@ -172,10 +299,10 @@ def _laad_actieve_store_links(base_pad: Path) -> pd.DataFrame:
     df_store['user_id'] = pd.to_numeric(df_store['user_id'], errors='coerce')
     df_store['store_id'] = pd.to_numeric(df_store['store_id'], errors='coerce')
     if 'deleted_at' in df_store.columns:
-        df_store['deleted_at'] = df_store['deleted_at'].replace({'NULL': pd.NA, 'None': pd.NA, '': pd.NA})
+        df_store['deleted_at'] = df_store['deleted_at'].replace(['NULL', 'None', ''], pd.NA)
         df_store = df_store[df_store['deleted_at'].isna()].copy()
     if 'archived_at' in df_store.columns:
-        df_store['archived_at'] = df_store['archived_at'].replace({'NULL': pd.NA, 'None': pd.NA, '': pd.NA})
+        df_store['archived_at'] = df_store['archived_at'].replace(['NULL', 'None', ''], pd.NA)
         df_store = df_store[df_store['archived_at'].isna()].copy()
 
     geldige_store_ids = set(_laad_actieve_stores(base_pad, include_deleted=True)['id'].dropna().astype(int))
@@ -256,12 +383,15 @@ def _laad_opdrachtgever_links(db_url: str | None = None) -> pd.DataFrame:
         .sort_values(['participant_id', 'store_id'])
     )
 
-    dubbele_participants = df_links.duplicated(subset=['participant_id'], keep=False).sum()
+    dubbele_koppelingsrijen_mask = df_links.duplicated(subset=['participant_id'], keep=False)
+    dubbele_participants = df_links.loc[dubbele_koppelingsrijen_mask, 'participant_id'].nunique()
+    dubbele_koppelingsrijen = int(dubbele_koppelingsrijen_mask.sum())
     if dubbele_participants:
         logger.warning(
-            "Meerdere opdrachtgeverkoppelingen gevonden voor %s participant-rijen; "
+            "Meerdere opdrachtgeverkoppelingen gevonden voor %s participants (%s koppelingsrijen); "
             "eerste store_id per participant wordt gebruikt.",
             dubbele_participants,
+            dubbele_koppelingsrijen,
         )
 
     return df_links.drop_duplicates(subset=['participant_id'], keep='first')
@@ -291,10 +421,7 @@ def _dashboard_score_to_history_slug(score_slug: str) -> str:
         'rec_ls_nutrition_natrium_per_day': 'salt',
         'rec_ls_score_natrium': 'salt',
         'rec_smoking_answer': 'smoking',
-        # De huidige scorehistorie bevat geen aparte 'lifestyle'-slug.
-        # Gebruik de beschikbare 'wellbeing'-historie als bruikbare fallback
-        # voor de trendweergave van de dashboard-leefstijlscore.
-        'rec_ls_lifestyle_score': 'wellbeing',
+        'rec_ls_lifestyle_score': 'lifestyle',
         'rec_resilience_score': 'resilience',
         'rec_wellbeing_score': 'wellbeing',
         'rec_self_efficacy_score': 'selfefficacy',
@@ -329,7 +456,6 @@ def laad_data(base_pad: Path, db_url: str | None = None) -> pd.DataFrame:
     from config import DATA_SOURCE
 
     if not isinstance(db_url, str):
-        from config import DB_URL
         db_url = DB_URL
 
     if DATA_SOURCE == 'csv':
@@ -360,7 +486,7 @@ def laad_data(base_pad: Path, db_url: str | None = None) -> pd.DataFrame:
         # Controleer of de tabel bestaat, anders proberen op te bouwen
         if 'users_met_scores' not in table_names:
             logger.warning("De tabel 'users_met_scores' ontbreekt. Poging tot genereren...")
-            ok, _ = generate_consolidated_scores_in_db(engine)
+            ok, _ = generate_consolidated_scores_in_db(db_url)
             if not ok:
                 return load_users_met_scores(db_url)
 
@@ -387,16 +513,17 @@ def maak_geslacht_plot(df: pd.DataFrame, lang: str = 'nl') -> go.Figure:
     gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
     counts = _tel_percentages(s, gender_labels)
     kleur_map = {v: GENDER_COLORS[k] for k, v in gender_labels.items()}
-    fig = px.bar(
-        counts, x='label', y='percentage',
-        color='label',
+    return _maak_percentage_bar_fig(
+        counts,
+        'label',
+        'percentage',
+        tr('Verdeling geslacht', lang),
+        x_label='',
+        y_label=tr('Percentage (%)', lang),
+        color_col='label',
         color_discrete_map=kleur_map,
-        labels={'label': '', 'percentage': tr('Percentage (%)', lang)},
-        title=tr('Verdeling geslacht', lang),
-        category_orders={'label': [tr('Man', lang), tr('Vrouw', lang)]},
+        category_order=[tr('Man', lang), tr('Vrouw', lang)],
     )
-    fig.update_layout(showlegend=False)
-    return fig
 
 
 def maak_leeftijd_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: str = 'nl') -> go.Figure:
@@ -440,16 +567,17 @@ def maak_heartrisk_plot(df: pd.DataFrame, lang: str = 'nl') -> go.Figure:
     labels = {k: tr(v, lang) for k, v in HEARTRISK_LABELS.items()}
     counts = _tel_percentages(s, labels)
     kleur_map = {v: RISICO_COLORS[k] for k, v in labels.items()}
-    fig = px.bar(
-        counts, x='label', y='percentage',
-        color='label',
+    return _maak_percentage_bar_fig(
+        counts,
+        'label',
+        'percentage',
+        tr('Cardiovasculair risico', lang),
+        x_label='',
+        y_label=tr('Percentage (%)', lang),
+        color_col='label',
         color_discrete_map=kleur_map,
-        labels={'label': '', 'percentage': tr('Percentage (%)', lang)},
-        title=tr('Cardiovasculair risico', lang),
-        category_orders={'label': [tr('Laag', lang), tr('Matig', lang), tr('Hoog', lang)]},
+        category_order=[tr('Laag', lang), tr('Matig', lang), tr('Hoog', lang)],
     )
-    fig.update_layout(showlegend=False)
-    return fig
 
 
 def maak_heartrisk_naar_geslacht_plot(df: pd.DataFrame, lang: str = 'nl', geslacht: str = 'beide') -> go.Figure:
@@ -501,124 +629,40 @@ def maak_heartrisk_naar_geslacht_plot(df: pd.DataFrame, lang: str = 'nl', geslac
 
 # ── BMI ────────────────────────────────────────────────────────────────────────
 def maak_bmi_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: str = 'nl') -> go.Figure:
-    if 'rec_med_bmi_cat' not in df.columns:
-        return _empty_plot(tr('Geen BMI-data beschikbaar.', lang))
-
-    df2 = df.copy()
-    df2['bmi_cat'] = pd.to_numeric(df2['rec_med_bmi_cat'], errors='coerce')
-    df2 = df2.dropna(subset=['bmi_cat'])
-
-    if df2.empty:
-        return _empty_plot(tr('Geen BMI-data beschikbaar.', lang))
-
     bmi_labels = {k: tr(v, lang) for k, v in BMI_LABELS.items()}
     bmi_order = [bmi_labels[k] for k in sorted(BMI_LABELS.keys())]
-
-    if geslacht == 'beide' and 'rec_user_gender' in df2.columns:
-        gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
-        df2['geslacht_label'] = pd.to_numeric(df2['rec_user_gender'], errors='coerce').map(gender_labels)
-        df2 = df2.dropna(subset=['geslacht_label'])
-        if df2.empty:
-            return _empty_plot(tr('Geen BMI-data beschikbaar.', lang))
-
-        counts = (
-            df2.groupby(['geslacht_label', 'bmi_cat'], observed=True)
-            .size()
-            .reset_index(name='aantal')
-        )
-        totals = counts.groupby('geslacht_label')['aantal'].transform('sum')
-        counts['percentage'] = counts['aantal'] / totals * 100
-        counts['label'] = counts['bmi_cat'].map(bmi_labels)
-        fig = go.Figure()
-        for code, kleur in [(1, GENDER_COLORS[1]), (0, GENDER_COLORS[0])]:
-            naam = gender_labels[code]
-            subset = counts[counts['geslacht_label'] == naam].set_index('label').reindex(bmi_order).fillna(0)
-            fig.add_trace(go.Bar(
-                x=subset.index,
-                y=subset['percentage'],
-                name=naam,
-                marker_color=kleur,
-            ))
-        fig.update_layout(
-            barmode='group',
-            legend_title_text=tr('Geslacht', lang),
-            title=tr('BMI categorie verdeling naar geslacht', lang),
-            xaxis_title='',
-            yaxis_title=tr('Percentage (%)', lang),
-        )
-        return fig
-
-    counts = _tel_percentages(df2['bmi_cat'], BMI_LABELS)
-    kleur_map = {v: BMI_COLORS[k] for k, v in BMI_LABELS.items()}
-    fig = px.bar(
-        counts, x='label', y='percentage',
-        color='label',
-        color_discrete_map=kleur_map,
-        labels={'label': '', 'percentage': tr('Percentage (%)', lang)},
-        title=tr('BMI categorie verdeling', lang),
-        category_orders={'label': bmi_order},
+    return _maak_kategorie_verdeling_fig(
+        df=df,
+        kolom='rec_med_bmi_cat',
+        label_map={k: bmi_labels[k] for k in sorted(BMI_LABELS.keys())},
+        volgorde=bmi_order,
+        leeg_tekst=tr('Geen BMI-data beschikbaar.', lang),
+        titel_enkel=tr('BMI categorie verdeling', lang),
+        titel_gesplitst=tr('BMI categorie verdeling naar geslacht', lang),
+        lang=lang,
+        geslacht=geslacht,
+        kleur_map={k: BMI_COLORS[k] for k in BMI_LABELS},
+        geslacht_kleur_map={1: GENDER_COLORS['Man'], 0: GENDER_COLORS['Vrouw']},
     )
-    fig.update_layout(showlegend=False)
-    return fig
 
 
 # ── Stress ─────────────────────────────────────────────────────────────────────
 def maak_stress_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: str = 'nl') -> go.Figure:
-    if 'rec_ls_stress_cat' not in df.columns:
-        return _empty_plot(tr('Geen stressdata beschikbaar.', lang))
-
-    df2 = df.copy()
-    df2['stress_cat'] = pd.to_numeric(df2['rec_ls_stress_cat'], errors='coerce')
-    df2 = df2.dropna(subset=['stress_cat'])
     stress_labels = {k: tr(v, lang) for k, v in STRESS_LABELS.items()}
     stress_order = [stress_labels[k] for k in sorted(STRESS_LABELS.keys())]
-
-    if geslacht == 'beide' and 'rec_user_gender' in df2.columns:
-        gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
-        df2['geslacht_label'] = pd.to_numeric(df2['rec_user_gender'], errors='coerce').map(gender_labels)
-        df2 = df2.dropna(subset=['geslacht_label'])
-        if df2.empty:
-            return _empty_plot(tr('Geen stressdata beschikbaar.', lang))
-
-        counts = (
-            df2.groupby(['geslacht_label', 'stress_cat'], observed=True)
-            .size()
-            .reset_index(name='aantal')
-        )
-        totals = counts.groupby('geslacht_label')['aantal'].transform('sum')
-        counts['percentage'] = counts['aantal'] / totals * 100
-        counts['label'] = counts['stress_cat'].map(stress_labels)
-        fig = go.Figure()
-        for code, kleur in [(1, GENDER_COLORS[1]), (0, GENDER_COLORS[0])]:
-            naam = gender_labels[code]
-            subset = counts[counts['geslacht_label'] == naam].set_index('label').reindex(stress_order).fillna(0)
-            fig.add_trace(go.Bar(
-                x=subset.index,
-                y=subset['percentage'],
-                name=naam,
-                marker_color=kleur,
-            ))
-        fig.update_layout(
-            barmode='group',
-            legend_title_text=tr('Geslacht', lang),
-            title=tr('Stresscategorie verdeling naar geslacht', lang),
-            xaxis_title='',
-            yaxis_title=tr('Percentage (%)', lang),
-        )
-        return fig
-
-    counts = _tel_percentages(df2['stress_cat'], stress_labels)
-    kleur_map = {v: RISICO_COLORS[k] for k, v in stress_labels.items()}
-    fig = px.bar(
-        counts, x='label', y='percentage',
-        color='label',
-        color_discrete_map=kleur_map,
-        labels={'label': '', 'percentage': tr('Percentage (%)', lang)},
-        title=tr('Stresscategorie verdeling', lang),
-        category_orders={'label': stress_order},
+    return _maak_kategorie_verdeling_fig(
+        df=df,
+        kolom='rec_ls_stress_cat',
+        label_map={k: stress_labels[k] for k in sorted(STRESS_LABELS.keys())},
+        volgorde=stress_order,
+        leeg_tekst=tr('Geen stressdata beschikbaar.', lang),
+        titel_enkel=tr('Stresscategorie verdeling', lang),
+        titel_gesplitst=tr('Stresscategorie verdeling naar geslacht', lang),
+        lang=lang,
+        geslacht=geslacht,
+        kleur_map={k: RISICO_COLORS[k] for k in STRESS_LABELS},
+        geslacht_kleur_map={1: GENDER_COLORS['Man'], 0: GENDER_COLORS['Vrouw']},
     )
-    fig.update_layout(showlegend=False)
-    return fig
 
 
 # ── Leefstijlscore ─────────────────────────────────────────────────────────────
@@ -631,18 +675,12 @@ def maak_leefstijl_score_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: s
     """
     if 'rec_ls_lifestyle_score' not in df.columns:
         return _empty_plot(tr('Geen leefstijlscore beschikbaar.', lang))
+
     df2 = df.copy()
     df2['rec_ls_lifestyle_score'] = pd.to_numeric(df2['rec_ls_lifestyle_score'], errors='coerce')
     df2 = df2.dropna(subset=['rec_ls_lifestyle_score'])
-
-    # Eenduidige categorie-indeling en kleuren voor alle modi
     bins = [0, 4, 7, 10]
     cat_labels = [tr('Slecht', lang), tr('Matig', lang), tr('Goed', lang)]
-    cat_colors = {
-        tr('Slecht', lang): RISICO_COLORS[2],   # rood
-        tr('Matig', lang): RISICO_COLORS[1],    # oranje
-        tr('Goed', lang): RISICO_COLORS[0],     # groen
-    }
     df2['categorie'] = pd.cut(
         df2['rec_ls_lifestyle_score'],
         bins=bins,
@@ -651,13 +689,23 @@ def maak_leefstijl_score_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: s
         right=True,
     )
     df2 = df2.dropna(subset=['categorie'])
+    if df2.empty:
+        return _empty_plot(tr('Geen leefstijldata beschikbaar voor deze selectie.', lang))
+
+    kleur_map = {
+        tr('Slecht', lang): RISICO_COLORS[2],
+        tr('Matig', lang): RISICO_COLORS[1],
+        tr('Goed', lang): RISICO_COLORS[0],
+    }
+    label_map = {0: tr('Slecht', lang), 1: tr('Matig', lang), 2: tr('Goed', lang)}
 
     if geslacht == 'beide' and 'rec_user_gender' in df.columns:
-        gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
+        gender_labels = _geslacht_labels(lang)
         df2['geslacht_label'] = pd.to_numeric(df2['rec_user_gender'], errors='coerce').map(gender_labels)
         df2 = df2.dropna(subset=['geslacht_label'])
         if df2.empty:
             return _empty_plot(tr('Geen leefstijldata beschikbaar voor deze selectie.', lang))
+
         counts = (
             df2.groupby(['geslacht_label', 'categorie'], observed=True)
             .size()
@@ -666,8 +714,7 @@ def maak_leefstijl_score_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: s
         totals = counts.groupby('geslacht_label')['aantal'].transform('sum').replace(0, pd.NA)
         counts['percentage'] = (counts['aantal'] / totals * 100).fillna(0)
         fig = go.Figure()
-        for code in (1, 0):
-            naam = gender_labels[code]
+        for code, naam in ((1, gender_labels[1]), (0, gender_labels[0])):
             subset = counts[counts['geslacht_label'] == naam].set_index('categorie').reindex(cat_labels).fillna(0)
             fig.add_trace(go.Bar(
                 x=list(subset.index),
@@ -683,22 +730,20 @@ def maak_leefstijl_score_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: s
             yaxis_title=tr('Percentage (%)', lang),
         )
         return fig
-    else:
-        if df2.empty:
-            return _empty_plot(tr('Geen leefstijldata beschikbaar voor deze selectie.', lang))
-        counts = df2['categorie'].value_counts().reindex(cat_labels).fillna(0).reset_index()
-        counts.columns = ['categorie', 'aantal']
-        counts['percentage'] = counts['aantal'] / counts['aantal'].sum() * 100
-        fig = px.bar(
-            counts, x='categorie', y='percentage',
-            color='categorie',
-            color_discrete_map=cat_colors,
-            labels={'categorie': tr('Categorie', lang), 'percentage': tr('Percentage (%)', lang)},
-            title=tr('Leefstijlscore categorieën', lang),
-            category_orders={'categorie': cat_labels},
-        )
-        fig.update_layout(showlegend=False)
-        return fig
+
+    counts = df2['categorie'].value_counts().reindex(cat_labels).fillna(0).reset_index()
+    counts.columns = ['categorie', 'aantal']
+    counts['percentage'] = counts['aantal'] / counts['aantal'].sum() * 100
+    fig = px.bar(
+        counts, x='categorie', y='percentage',
+        color='categorie',
+        color_discrete_map=kleur_map,
+        labels={'categorie': tr('Categorie', lang), 'percentage': tr('Percentage (%)', lang)},
+        title=tr('Leefstijlscore categorieën', lang),
+        category_orders={'categorie': cat_labels},
+    )
+    fig.update_layout(showlegend=False)
+    return fig
 
 
 # ── Longitudinale data ─────────────────────────────────────────────────────────
@@ -1113,9 +1158,9 @@ def get_available_stores_with_score_changes(base_pad: Path, score_slug: str,
 
 def _prepare_store_score_trends(base_pad: Path, score_slug: str,
                                 min_deelnemers: int = 1,
-                                store_id: int = None,
+                                store_id: int | None = None,
                                 aggregate_all: bool = False,
-                                participant_ids: list | set | pd.Series | None = None) -> pd.DataFrame:
+                                participant_ids: ParticipantIds = None) -> pd.DataFrame:
     history_slug = _dashboard_score_to_history_slug(score_slug)
     df_history = laad_longitudinale_data(base_pad, DB_URL)
     df_scores = df_history[df_history['slug'] == history_slug].copy()
@@ -1219,9 +1264,9 @@ def _empty_store_plot(melding: str) -> go.Figure:
 
 def maak_store_gemiddelde_scores_plot(base_pad: Path, score_slug: str,
                                       score_label: str, min_deelnemers: int = 1,
-                                      store_id: int = None,
+                                      store_id: int | None = None,
                                       richting_label: str = '',
-                                      participant_ids: list | set | pd.Series | None = None) -> go.Figure:
+                                      participant_ids: ParticipantIds = None) -> go.Figure:
     df_plot = _prepare_store_score_trends(
         base_pad=base_pad,
         score_slug=score_slug,
@@ -1287,9 +1332,9 @@ def maak_store_gemiddelde_scores_plot(base_pad: Path, score_slug: str,
 
 def maak_store_gemiddelde_verandering_plot(base_pad: Path, score_slug: str,
                                            score_label: str, min_deelnemers: int = 1,
-                                           store_id: int = None,
+                                           store_id: int | None = None,
                                            richting_label: str = '',
-                                           participant_ids: list | set | pd.Series | None = None) -> go.Figure:
+                                           participant_ids: ParticipantIds = None) -> go.Figure:
     df_plot = _prepare_store_score_trends(
         base_pad=base_pad,
         score_slug=score_slug,
@@ -1347,7 +1392,7 @@ def maak_store_gemiddelde_verandering_plot(base_pad: Path, score_slug: str,
 
 
 def maak_store_scoreverbetering_plot(base_pad: Path, db_url: str, score_type: str = 'job_satisfaction',
-                                      maanden_window: int = 3, store_id: int = None) -> go.Figure:
+                                     maanden_window: int = 3, store_id: int | None = None) -> go.Figure:
     """
     Toont score trend over tijd per maand, optioneel gefilterd per store.
     
@@ -1588,7 +1633,7 @@ def maak_bmi_beweging_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: str 
         ax_bmi.plot(df_pivot.index, df_pivot['bmi'], marker='o',
                     color='salmon', linewidth=2, markersize=7, label='BMI')
         for jaar, val in df_pivot['bmi'].items():
-            ax_bmi.annotate(f'{val:.1f}', (jaar, val),
+            ax_bmi.annotate(f'{val:.1f}', (float(str(jaar)), float(val)),
                             textcoords='offset points', xytext=(0, 8),
                             ha='center', fontsize=8, color='salmon')
 
@@ -1596,7 +1641,7 @@ def maak_bmi_beweging_plot(df: pd.DataFrame, geslacht: str = 'beide', lang: str 
         ax_exercise.plot(df_pivot.index, df_pivot['exercise'], marker='o',
                          color='steelblue', linewidth=2, markersize=7, label='Bewegingsminuten/week')
         for jaar, val in df_pivot['exercise'].items():
-            ax_exercise.annotate(f'{val:.0f}', (jaar, val),
+            ax_exercise.annotate(f'{val:.0f}', (float(str(jaar)), float(val)),
                                  textcoords='offset points', xytext=(0, 8),
                                  ha='center', fontsize=8, color='steelblue')
 
@@ -1866,6 +1911,9 @@ def voeg_dieet_score_toe(df: pd.DataFrame) -> pd.DataFrame:
 def maak_dieet_verdeling_plot(df: pd.DataFrame, geslacht: str = 'totaal', lang: str = 'nl') -> go.Figure:
     """Staafdiagram van de verdeling van dieet categorieën."""
     df = voeg_dieet_score_toe(df)
+    def translate_category(value: object) -> str:
+        return tr(str(value), lang)
+
     labels_t = [tr(label, lang) for label in DIEET_LABELS]
     if geslacht == 'beide' and 'rec_user_gender' in df.columns:
         gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
@@ -1873,7 +1921,7 @@ def maak_dieet_verdeling_plot(df: pd.DataFrame, geslacht: str = 'totaal', lang: 
         df = df.dropna(subset=['dieet_cat', 'geslacht_label'])
         counts = df.groupby(['geslacht_label', 'dieet_cat'], observed=True).size().reset_index(name='aantal')
         counts['percentage'] = counts['aantal'] / counts.groupby('geslacht_label')['aantal'].transform('sum') * 100
-        counts['categorie'] = counts['dieet_cat'].astype(str).map(lambda x: tr(x, lang))
+        counts['categorie'] = counts['dieet_cat'].map(translate_category)
         fig = px.bar(
             counts, x='categorie', y='percentage', color='geslacht_label', barmode='group',
             color_discrete_map={gender_labels[1]: GENDER_COLORS['Man'], gender_labels[0]: GENDER_COLORS['Vrouw']},
@@ -1886,7 +1934,7 @@ def maak_dieet_verdeling_plot(df: pd.DataFrame, geslacht: str = 'totaal', lang: 
     counts = df['dieet_cat'].value_counts(normalize=True).mul(100).reset_index()
     counts.columns = ['categorie', 'percentage']
     kleur_map = {tr(label, lang): kleur for label, kleur in DIEET_COLORS.items()}
-    counts['categorie'] = counts['categorie'].astype(str).map(lambda x: tr(x, lang))
+    counts['categorie'] = counts['categorie'].map(translate_category)
     counts['categorie'] = pd.Categorical(counts['categorie'], categories=labels_t, ordered=True)
     counts = counts.sort_values('categorie')
 
@@ -1905,11 +1953,14 @@ def maak_dieet_verdeling_plot(df: pd.DataFrame, geslacht: str = 'totaal', lang: 
 def maak_dieet_bmi_plot(df: pd.DataFrame, geslacht: str = 'totaal', lang: str = 'nl') -> go.Figure:
     """Gegroepeerd staafdiagram: dieet categorie vs BMI categorie."""
     df = voeg_dieet_score_toe(df)
+    def translate_category(value: object) -> str:
+        return tr(str(value), lang)
+
     df['bmi_label'] = pd.to_numeric(df['rec_med_bmi_cat'], errors='coerce').map(
         {k: tr(v, lang) for k, v in BMI_LABELS.items()}
     )
     df2 = df.dropna(subset=['dieet_cat', 'bmi_label']).copy()
-    df2['dieet_cat'] = df2['dieet_cat'].astype(str).map(lambda x: tr(x, lang))
+    df2['dieet_cat'] = df2['dieet_cat'].map(translate_category)
 
     if geslacht == 'beide' and 'rec_user_gender' in df2.columns:
         gender_labels = {k: tr(v, lang) for k, v in GENDER_LABELS.items()}
@@ -2007,7 +2058,7 @@ def maak_dieet_score_histogram(df: pd.DataFrame, geslacht: str = 'beide', lang: 
             color_discrete_map=kleur_map,
             points='all',
             labels={
-                'dieet_score': tr('Dieet score (0-5)', lang),
+                'dieet_score': tr('Dieet score', lang),
                 'geslacht_label': tr('Geslacht', lang),
             },
             title=tr('Dieet score naar geslacht', lang),
@@ -2037,7 +2088,7 @@ def maak_dieet_score_histogram(df: pd.DataFrame, geslacht: str = 'beide', lang: 
             y='dieet_score',
             color_discrete_sequence=[HOOFD_KLEUR],
             points='all',
-            labels={'dieet_score': tr('Dieet score (0-5)', lang)},
+            labels={'dieet_score': tr('Dieet score', lang)},
             title=tr('Dieet score', lang),
         )
         fig.update_traces(
@@ -2145,7 +2196,8 @@ def maak_verkenner_plot(df: pd.DataFrame, variabele: dict, geslacht_filter: str 
     elif geslacht_filter in {'beide', 'totaal', None}:
         df2 = df2.dropna(subset=['geslacht_label'])
 
-    x_label = f"{label}" + (f" ({eenheid})" if eenheid else "")
+    zichtbare_eenheid = re.sub(r'\s*\([^)]*\)', '', eenheid).strip()
+    x_label = f"{label}" + (f" ({zichtbare_eenheid})" if zichtbare_eenheid else "")
 
     # ── Slaaptekst speciaal geval ──────────────────────────────────────────────
     if vtype == 'slaap_tekst':
@@ -2299,7 +2351,7 @@ def maak_verkenner_plot(df: pd.DataFrame, variabele: dict, geslacht_filter: str 
 
 
 # ── Platform groei ─────────────────────────────────────────────────────────────
-def maak_platform_groei_plot(base_pad, participant_ids: list | set | pd.Series | None = None) -> go.Figure:
+def maak_platform_groei_plot(base_pad, participant_ids: ParticipantIds = None) -> go.Figure:
     """
     Toont nieuwe accounts en ingevulde vragenlijsten per jaar als gecombineerde grafiek.
     Aligned met account_activatie: "ingevuld" betekent "heeft scores in users_met_scores".
@@ -2432,7 +2484,7 @@ def maak_update_verificatie_plot(df: pd.DataFrame, lang: str = 'nl') -> go.Figur
 
 
 # ── Account activatie ──────────────────────────────────────────────────────────
-def maak_account_activatie_plot(base_pad, participant_ids: list | set | pd.Series | None = None) -> go.Figure:
+def maak_account_activatie_plot(base_pad, participant_ids: ParticipantIds = None) -> tuple[go.Figure, pd.DataFrame]:
     """
     Toont per jaar:
     - Nieuwe accounts aangemaakt
@@ -2474,7 +2526,10 @@ def maak_account_activatie_plot(base_pad, participant_ids: list | set | pd.Serie
     df_users['actief'] = df_users['id_num'].isin(actieve_ids)
 
     # Zorg dat jaar-kolom bestaat en filter op plausibele jaren
-    df_users['jaar'] = pd.to_datetime(df_users.get('created_at'), errors='coerce').dt.year
+    if 'created_at' in df_users.columns:
+        df_users['jaar'] = pd.to_datetime(df_users['created_at'], errors='coerce').dt.year
+    else:
+        df_users['jaar'] = pd.NA
 
     # Aggregeer per jaar (beperk tot realistische jaren)
     groep = (
@@ -2532,7 +2587,7 @@ def maak_account_activatie_plot(base_pad, participant_ids: list | set | pd.Serie
 
 
 # ── Vragenlijst invulpercentage ────────────────────────────────────────────────
-def maak_vragenlijst_plot(base_pad, db_url: str, participant_ids: list | set | pd.Series | None = None):
+def maak_vragenlijst_plot(base_pad, db_url: str, participant_ids: ParticipantIds = None):
     """
     Toont per vragenlijst:
     - Wanneer deze voor het eerst werd ingevuld
@@ -2615,7 +2670,8 @@ def maak_vragenlijst_plot(base_pad, db_url: str, participant_ids: list | set | p
     deelnemers_per_vragenlijst = []
     for _, row in agg.iterrows():
         eerste_invulling = row['eerste_invulling']
-        n_eligible = df_comp.loc[df_comp['created_at'] >= eerste_invulling, 'participant_id'].nunique()
+        eligible = df_comp[df_comp['created_at'] >= eerste_invulling]
+        n_eligible = eligible['participant_id'].nunique()
         deelnemers_per_vragenlijst.append(n_eligible)
     agg['n_eligible'] = deelnemers_per_vragenlijst
     agg['pct'] = (agg['n_ingevuld'] / agg['n_eligible'] * 100).round(1)
@@ -2667,7 +2723,7 @@ def maak_vragenlijst_plot(base_pad, db_url: str, participant_ids: list | set | p
 
 
 # ── Kopers vs niet-kopers ──────────────────────────────────────────────────────
-def maak_kopers_vergelijking_plot(base_pad: Path, db_url: str, participant_ids: list | set | pd.Series | None = None) -> tuple:
+def maak_kopers_vergelijking_plot(base_pad: Path, db_url: str, participant_ids: ParticipantIds = None) -> tuple:
     """
     Vergelijkt gemiddelde scores van kopers vs niet-kopers.
     
@@ -2707,8 +2763,14 @@ def maak_kopers_vergelijking_plot(base_pad: Path, db_url: str, participant_ids: 
 
     # Bepaal kopers op basis van participant_id of user_id, zodat koppeling ook werkt
     # wanneer de order- en scorebronnen verschillende identifieringsystemen gebruiken.
-    kopers_participant = set(pd.to_numeric(df_koppeling.get('participant_id'), errors='coerce').dropna().astype(int))
-    kopers_user = set(pd.to_numeric(df_koppeling.get('user_id'), errors='coerce').dropna().astype(int))
+    kopers_participant = set(pd.to_numeric(
+        df_koppeling['participant_id'] if 'participant_id' in df_koppeling.columns else pd.Series(dtype='float64'),
+        errors='coerce',
+    ).dropna().astype(int))
+    kopers_user = set(pd.to_numeric(
+        df_koppeling['user_id'] if 'user_id' in df_koppeling.columns else pd.Series(dtype='float64'),
+        errors='coerce',
+    ).dropna().astype(int))
 
     if not kopers_participant and not kopers_user:
         # No valid participant mapping - cannot determine buyers
@@ -2752,9 +2814,6 @@ def maak_kopers_vergelijking_plot(base_pad: Path, db_url: str, participant_ids: 
         'Fruit score':      'rec_ls_score_fruit',
     }
 
-    # Lager is beter voor deze indicatoren
-    lager_beter = {'BMI', 'Stress', 'Heartrisk score', 'Slaap (PSQI)', 'Werkdruk'}
-
     rijen = []
     for label, kolom in indicatoren.items():
         if kolom not in df_scores_expanded.columns:
@@ -2768,19 +2827,6 @@ def maak_kopers_vergelijking_plot(base_pad: Path, db_url: str, participant_ids: 
                           'Gemiddelde': round(gem, 2), 'N': n})
 
     df_plot = pd.DataFrame(rijen)
-
-    # Normaliseer naar 0-100 schaal per indicator voor vergelijkbaarheid
-    genorm = []
-    for ind in df_plot['Indicator'].unique():
-        sub = df_plot[df_plot['Indicator'] == ind].copy()
-        min_v = sub['Gemiddelde'].min()
-        max_v = sub['Gemiddelde'].max()
-        bereik = max_v - min_v if max_v != min_v else 1
-        sub['Verschil_%'] = ((sub['Gemiddelde'] - min_v) / bereik * 100).round(1)
-        if ind in lager_beter:
-            sub['Verschil_%'] = 100 - sub['Verschil_%']
-        genorm.append(sub)
-    df_plot = pd.concat(genorm)
 
     volgorde = ['Heeft product gekocht', 'Geen product gekocht']
     kleur_map = {
@@ -2913,7 +2959,7 @@ def maak_inactieve_accounts_plot(base_pad) -> tuple:
     return fig_jaar, samenvatting, kenmerken
 
 
-def maak_artikel_interacties_overzicht(base_pad, user_ids: list | set | pd.Series | None = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
+def maak_artikel_interacties_overzicht(base_pad, user_ids: ParticipantIds = None) -> tuple[pd.DataFrame, pd.DataFrame, dict]:
     """
     Koppel content views aan gebruikers en artikeltitels.
     Haalt data uit database via 'interactions' tabel i.p.v. CSV bestanden.
@@ -2939,7 +2985,6 @@ def maak_artikel_interacties_overzicht(base_pad, user_ids: list | set | pd.Serie
     empty_top_artikelen = pd.DataFrame(columns=['interactable_id', 'title', 'Views', 'Unieke_lezers', 'Laatste_view'])
 
     try:
-        from config import DB_URL
         if not DB_URL:
             raise ValueError("Geen database URL beschikbaar")
         
@@ -3168,15 +3213,15 @@ def maak_artikel_interacties_overzicht(base_pad, user_ids: list | set | pd.Serie
 # Indicatoren zonder entry vallen terug op de relatieve methode
 # (t.o.v. het gewogen totaalgemiddelde).
 SCORE_AFKAPWAARDES: dict[str, dict] = {
-    # Leefstijlscore (1-10) en dieetscores (0-5) — hoger = beter
+    # Voedings- en bewegingswaarden gebruiken hun oorspronkelijke eenheid.
     'rec_ls_lifestyle_score':        {'richting': 'hoger_is_beter', 'grens_goed': 6.0, 'grens_hoog': 7.5},
-    'rec_ls_score_fruit':            {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_vegetables':       {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_sugar':            {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_saturated_fat':    {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_natrium':          {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_alcohol':          {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
-    'rec_ls_score_exercise':         {'richting': 'hoger_is_beter', 'grens_goed': 3.0, 'grens_hoog': 4.0},
+    'rec_ls_score_fruit':            {'richting': 'lager_is_beter', 'grens_goed': 1.0, 'grens_hoog': 2.0},
+    'rec_ls_score_vegetables':       {'richting': 'hoger_is_beter', 'grens_goed': 150.0, 'grens_hoog': 250.0},
+    'rec_ls_score_sugar':            {'richting': 'lager_is_beter', 'grens_goed': 25.0, 'grens_hoog': 50.0},
+    'rec_ls_score_saturated_fat':    {'richting': 'lager_is_beter', 'grens_goed': 22.0, 'grens_hoog': 35.0},
+    'rec_ls_score_natrium':          {'richting': 'lager_is_beter', 'grens_goed': 2400.0, 'grens_hoog': 3500.0},
+    'rec_ls_score_alcohol':          {'richting': 'lager_is_beter', 'grens_goed': 1.0, 'grens_hoog': 14.0},
+    'rec_ls_score_exercise':         {'richting': 'hoger_is_beter', 'grens_goed': 150.0, 'grens_hoog': 300.0},
     # Psycho-sociale scores — hoger = beter (instrumenteigen schalen)
     'rec_wellbeing_score':           {'richting': 'hoger_is_beter', 'grens_goed': 55.0, 'grens_hoog': 75.0},   # WHO-5 stijl, 0-100
     'rec_resilience_score':          {'richting': 'hoger_is_beter', 'grens_goed': 26.0, 'grens_hoog': 33.0},   # CD-RISC-10, 0-40
@@ -3189,7 +3234,11 @@ SCORE_AFKAPWAARDES: dict[str, dict] = {
     'rec_asr_vitality_score':        {'richting': 'hoger_is_beter', 'grens_goed': 6.0, 'grens_hoog': 7.5},
     'rec_asr_job_satisfaction_score': {'richting': 'hoger_is_beter', 'grens_goed': 6.0, 'grens_hoog': 7.5},
     # Medische en belastingscores — lager = beter
-    'rec_med_bmi':                   {'richting': 'lager_is_beter', 'grens_goed': 25.0, 'grens_hoog': 30.0},
+    'rec_med_bmi':                   {
+        'richting': 'lager_is_beter',
+        'grens_goed': CATEGORIEEN['bmi']['grenzen'][2],
+        'grens_hoog': CATEGORIEEN['bmi']['grenzen'][3],
+    },
     'rec_heartrisk':                 {'richting': 'lager_is_beter', 'grens_goed': 10.0, 'grens_hoog': 20.0},
     # Stresssom: waargenomen bereik 0-28 (korte somscore), niet 0-40 zoals eerst
     # geconfigureerd — daardoor werd de hoogste band nooit bereikt.
@@ -3210,7 +3259,7 @@ AFKAPWAARDE_BANDEN: dict[str, dict] = {
     'hoger_is_beter': {
         'laag':   {'label': 'Laag',  'kleur': '#E74C3C'},  # rood
         'midden': {'label': 'Goed',  'kleur': '#2ECC71'},  # groen
-        'hoog':   {'label': 'Hoog',  'kleur': '#1A8A4A'},  # donkergroen
+        'hoog':   {'label': 'Hoog',  'kleur': RISICO_COLORS[0]},  # groen
     },
     'lager_is_beter': {
         'laag':   {'label': 'Laag',  'kleur': '#2ECC71'},  # groen
@@ -3273,7 +3322,7 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
                                    indicator: str = 'rec_ls_lifestyle_score',
                                    indicator_label: str = 'Leefstijlscore',
                                    min_n: int = 1,
-                                   participant_ids: list | set | pd.Series | None = None,
+                                   participant_ids: ParticipantIds = None,
                                    afkapwaardes: dict | None = None) -> tuple:
     """
     Vergelijkt gemiddelde scores per opdrachtgever (store).
@@ -3287,6 +3336,11 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
     from pathlib import Path
     import pandas as pd
     base_pad = Path(base_pad)
+
+    # BMI moet als BMI-categorie worden weergegeven, ook als een aanroeper de
+    # reeds gecodeerde categorie-kolom doorgeeft.
+    if indicator == 'rec_med_bmi_cat':
+        indicator = 'rec_med_bmi'
 
     # Scores laden
     df_expanded = load_my_clic_participants_expanded(db_url or DB_URL)
@@ -3321,18 +3375,6 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
         participant_id_col='participant_id',
         bridge_loader=_laad_participant_user_bridge,
     )
-
-    # Dieetsubscores gelden op de snapshot als 0-5 score. In deze kolommen
-    # zitten ook rauwe intake-waarden (gram/mg/per week); die vallen buiten
-    # het scoredomein en worden genegeerd i.p.v. het gemiddelde te verstoren.
-    if indicator in DIEET_SCORE_COLS:
-        _s = pd.to_numeric(df_expanded.get(indicator), errors='coerce')
-        _buiten = int((_s.notna() & ((_s < 0) | (_s > 5))).sum())
-        if _buiten:
-            logging.info(
-                f"Snapshot {indicator}: {_buiten} waarde(n) buiten scoredomein [0-5] genegeerd"
-            )
-            df_expanded[indicator] = _s.where(_s.between(0, 5))
 
     if indicator in df_expanded.columns:
         df_expanded['score'] = pd.to_numeric(df_expanded[indicator], errors='coerce')
@@ -3371,17 +3413,33 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
     # Indeling met vaste absolute afkapwaardes; voor indicatoren zonder
     # configuratie een relatieve indeling t.o.v. het gewogen totaalgemiddelde.
     config_afkap = afkapwaardes if afkapwaardes is not None else SCORE_AFKAPWAARDES.get(indicator)
+    absolute_config = config_afkap or {}
+
+    def _bmi_categorie(score):
+        code = leid_categorie_af(pd.Series([score]), 'bmi').iloc[0]
+        return BMI_LABELS.get(int(code), 'Onbekend') if pd.notna(code) else 'Onbekend'
+
     if config_afkap:
         methode = 'absoluut'
-        banden_cfg = AFKAPWAARDE_BANDEN[config_afkap['richting']]
-        volgorde = [banden_cfg['laag'], banden_cfg['midden'], banden_cfg['hoog']]
-        agg['categorie'] = agg['gemiddelde'].apply(lambda g: _afkap_categorie(g, config_afkap))
-        band_uitleg = (
-            f"{banden_cfg['laag']['label']} < {config_afkap['grens_goed']:g} · "
-            f"{banden_cfg['midden']['label']} {config_afkap['grens_goed']:g}–{config_afkap['grens_hoog']:g} · "
-            f"{banden_cfg['hoog']['label']} ≥ {config_afkap['grens_hoog']:g}"
-        )
-        grenzen = (float(config_afkap['grens_goed']), float(config_afkap['grens_hoog']))
+        if indicator == 'rec_med_bmi':
+            volgorde = [
+                {'label': BMI_LABELS[code], 'kleur': BMI_COLORS[code]}
+                for code in sorted(BMI_LABELS)
+            ]
+
+            agg['categorie'] = agg['gemiddelde'].apply(_bmi_categorie)
+            band_uitleg = ' · '.join(band['label'] for band in volgorde)
+            grenzen = None
+        else:
+            banden_cfg = AFKAPWAARDE_BANDEN[config_afkap['richting']]
+            volgorde = [banden_cfg['laag'], banden_cfg['midden'], banden_cfg['hoog']]
+            agg['categorie'] = agg['gemiddelde'].apply(lambda g: _afkap_categorie(g, config_afkap))
+            band_uitleg = (
+                f"{banden_cfg['laag']['label']} < {config_afkap['grens_goed']:g} · "
+                f"{banden_cfg['midden']['label']} {config_afkap['grens_goed']:g}–{config_afkap['grens_hoog']:g} · "
+                f"{banden_cfg['hoog']['label']} ≥ {config_afkap['grens_hoog']:g}"
+            )
+            grenzen = (float(config_afkap['grens_goed']), float(config_afkap['grens_hoog']))
         richting = config_afkap['richting']
     else:
         methode = 'relatief'
@@ -3420,7 +3478,8 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
     if methode == 'absoluut':
         df_scored = df_expanded.dropna(subset=['score']).copy()
         if not df_scored.empty and 'store_naam' in df_scored.columns:
-            df_scored['band'] = df_scored['score'].apply(lambda s: _afkap_categorie(s, config_afkap))
+            categorieer_score = _bmi_categorie if indicator == 'rec_med_bmi' else lambda s: _afkap_categorie(s, absolute_config)
+            df_scored['band'] = df_scored['score'].apply(categorieer_score)
             label_volgorde = [band['label'] for band in volgorde]
             kleur_map = {band['label']: band['kleur'] for band in volgorde}
             verdeling = (
@@ -3531,7 +3590,7 @@ def maak_scores_per_opdrachtgever(base_pad, db_url: str,
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-def maak_meerdere_vragenlijsten_plot(base_pad: Path, participant_ids: list | set | pd.Series | None = None) -> tuple:
+def maak_meerdere_vragenlijsten_plot(base_pad: Path, participant_ids: ParticipantIds = None) -> tuple:
     """
     Analyseert wie meerdere vragenlijsten invullen.
     Geeft een plot van de verdeling + een profielanalyse terug.
@@ -3740,8 +3799,8 @@ def maak_vroege_kopers_profiel(base_pad: Path, db_url: str,
         user_lookup = df_kopers.dropna(subset=['user_id']).set_index('user_id').to_dict(orient='index')
 
         for idx, row in df_all.iterrows():
-            pid = pd.to_numeric(row.get('participant_id'), errors='coerce')
-            uid = pd.to_numeric(row.get('user_id'), errors='coerce')
+            pid = pd.to_numeric(row['participant_id'], errors='coerce')
+            uid = pd.to_numeric(row['user_id'], errors='coerce') if 'user_id' in row.index else pd.NA
             if pd.notna(pid) and int(pid) in participant_lookup:
                 meta = participant_lookup[int(pid)]
             elif pd.notna(uid) and int(uid) in user_lookup:
@@ -3874,7 +3933,11 @@ def _is_higher_better(slug: str) -> bool:
             if kleur_richting == 'midden_goed':
                 return True
     
-    lager_is_beter = ['alcohol', 'smoking', 'stress', 'bmi', 'sugar', 'fat', 'salt', 'blood_pressure', 'diabetes']
+    lager_is_beter = [
+        'alcohol', 'smoking', 'stress', 'bmi', 'sugar', 'fat', 'salt',
+        'blood_pressure', 'diabetes', 'sleep', 'heartrisk', 'workload',
+        'dass_stress', 'dass_anxiety', 'dass_depression', 'heart_risk'
+    ]
     return slug not in lager_is_beter
 
 
@@ -3913,54 +3976,61 @@ def maak_risico_migratie_sankey(df_long: pd.DataFrame, slug: str, label_map: dic
 
     groen, oranje, rood = '#2ECC71', '#E87722', '#E74C3C'
 
-    # Bepaal kleur per categorie op basis van higher_is_better logica
-    cat_to_color = {}
-    for cat in display_cats:
-        if ncats == 1:
-            cat_to_color[cat] = groen
-        elif ncats == 2:
-            if higher_is_better:
-                cat_to_color[cat] = groen if cat == max(present_cats) else rood
+    # BMI-categorieën hebben een speciale semantiek: normaal gewicht is het groene midden,
+    # terwijl onder-/overgewicht en extreme waarden oranje/rood zijn.
+    if slug == 'bmi':
+        cat_to_color = {cat: BMI_COLORS.get(cat, oranje) for cat in display_cats}
+    else:
+        # Bepaal kleur per categorie op basis van higher_is_better logica
+        cat_to_color = {}
+        for cat in display_cats:
+            if ncats == 1:
+                cat_to_color[cat] = groen
+            elif ncats == 2:
+                if higher_is_better:
+                    cat_to_color[cat] = groen if cat == max(present_cats) else rood
+                else:
+                    cat_to_color[cat] = groen if cat == min(present_cats) else rood
+            elif ncats == 3:
+                if higher_is_better:
+                    if cat == max(present_cats):
+                        cat_to_color[cat] = groen
+                    elif cat == min(present_cats):
+                        cat_to_color[cat] = rood
+                    else:
+                        cat_to_color[cat] = oranje
+                else:
+                    if cat == min(present_cats):
+                        cat_to_color[cat] = groen
+                    elif cat == max(present_cats):
+                        cat_to_color[cat] = rood
+                    else:
+                        cat_to_color[cat] = oranje
             else:
-                cat_to_color[cat] = groen if cat == min(present_cats) else rood
-        elif ncats == 3:
-            if higher_is_better:
-                if cat == max(present_cats):
-                    cat_to_color[cat] = groen
-                elif cat == min(present_cats):
-                    cat_to_color[cat] = rood
+                # Meer dan 3: verdeel groen/oranje/rood lineair
+                if higher_is_better:
+                    if cat == max(present_cats):
+                        cat_to_color[cat] = groen
+                    elif cat == min(present_cats):
+                        cat_to_color[cat] = rood
+                    else:
+                        cat_to_color[cat] = oranje
                 else:
-                    cat_to_color[cat] = oranje
-            else:
-                if cat == min(present_cats):
-                    cat_to_color[cat] = groen
-                elif cat == max(present_cats):
-                    cat_to_color[cat] = rood
-                else:
-                    cat_to_color[cat] = oranje
-        else:
-            # Meer dan 3: verdeel groen/oranje/rood lineair
-            if higher_is_better:
-                if cat == max(present_cats):
-                    cat_to_color[cat] = groen
-                elif cat == min(present_cats):
-                    cat_to_color[cat] = rood
-                else:
-                    cat_to_color[cat] = oranje
-            else:
-                if cat == min(present_cats):
-                    cat_to_color[cat] = groen
-                elif cat == max(present_cats):
-                    cat_to_color[cat] = rood
-                else:
-                    cat_to_color[cat] = oranje
+                    if cat == min(present_cats):
+                        cat_to_color[cat] = groen
+                    elif cat == max(present_cats):
+                        cat_to_color[cat] = rood
+                    else:
+                        cat_to_color[cat] = oranje
 
     cat_colors = [cat_to_color[cat] for cat in display_cats]
     if ncats == 1:
-        positions = [0.45]
+        positions = [0.5]
     else:
-        step = 0.8 / (ncats - 1)
-        positions = [0.05 + (idx * step) for idx in range(ncats)]
+        # Houd de labels uit elkaar; de node-labels bevatten ook de aantallen.
+        step = 0.145 if ncats == 5 else 0.64 / (ncats - 1)
+        start = 0.02 if ncats == 5 else 0.06
+        positions = [start + (idx * step) for idx in range(ncats)]
 
     node_colors = cat_colors + cat_colors
     node_x = [0.02] * ncats + [0.98] * ncats
@@ -3984,10 +4054,17 @@ def maak_risico_migratie_sankey(df_long: pd.DataFrame, slug: str, label_map: dic
         link_hover.append(f"{tr(label_map.get(s, str(s)), lang)} → {tr(label_map.get(t, str(t)), lang)}: {v:,} ({pct:.1f}%)")
     
     link_colors = []
-    
+
     for _, row in matrix.iterrows():
         s, t = int(row['Van']), int(row['Na'])
-        if not higher_is_better:
+        if slug == 'bmi':
+            if abs(t) < abs(s):
+                color = 'rgba(46, 204, 113, 0.4)'  # Groen: dichter bij normaal gewicht
+            elif abs(t) > abs(s):
+                color = 'rgba(231, 76, 60, 0.4)'  # Rood: verder van normaal gewicht
+            else:
+                color = 'rgba(200, 200, 200, 0.4)'
+        elif not higher_is_better:
             if t < s: color = 'rgba(46, 204, 113, 0.4)' # Groen (verbetering)
             elif t > s: color = 'rgba(231, 76, 60, 0.4)' # Rood (verslechtering)
             else: color = 'rgba(200, 200, 200, 0.4)'
@@ -3998,9 +4075,9 @@ def maak_risico_migratie_sankey(df_long: pd.DataFrame, slug: str, label_map: dic
         link_colors.append(color)
 
     fig = go.Figure(data=[go.Sankey(
-        arrangement='freeform',
+        arrangement='snap',
         node = dict(
-            pad = 30,
+            pad = 40,
             thickness = 20,
             line = dict(color = "black", width = 0.5),
             label = all_labels,
@@ -4024,19 +4101,27 @@ def maak_risico_migratie_sankey(df_long: pd.DataFrame, slug: str, label_map: dic
 
     fig.update_layout(
         title_text=tr("Risico-migratie: verschuiving tussen eerste en laatste meting", lang),
-        height=700,
-        margin=dict(l=200, r=200, t=100, b=50),
-        font=dict(size=12, family='Arial, sans-serif', color='black'),
+        height=max(800, 190 * ncats),
+        margin=dict(l=220, r=220, t=100, b=50),
+        font=dict(size=11, family='Arial, sans-serif', color='black'),
         paper_bgcolor='white',
         plot_bgcolor='white'
     )
     return fig
 
 
+RISICO_MIGRATIE_EXCLUDED_SLUGS = {
+    'dass_stress',
+    'dass_anxiety',
+    'dass_depression',
+}
+
+
 DEFAULT_RISICOMIGRATIE_BINS = {
     'bmi': {
-        'bins': [-0.1, 18.5, 25.0, 30.0, 1000.0],
-        'labels': ['Ondergewicht (<18.5)', 'Normaal gewicht (18.5-25)', 'Overgewicht (25-30)', 'Obesitas (>30)']
+        'bins': [-np.inf, 16.0, 18.5, 25.0, 30.0, np.inf],
+        'labels': [BMI_LABELS[code] for code in [-2, -1, 0, 1, 2]],
+
     },
     'fruit': {
         'bins': [-0.1, 0.5, 1.5, 10000.0],
@@ -4111,12 +4196,12 @@ DEFAULT_RISICOMIGRATIE_BINS = {
         'labels': ['Ontevreden (<5)', 'Voldoende (5-7.5)', 'Tevreden (>7.5)']
     },
     'lifestyle': {
-        'bins': [-0.1, 60.0, 80.0, 100.0],
-        'labels': ['Matig (<60)', 'Voldoende (60-80)', 'Uitstekend (>80)']
+        'bins': [-0.1, 6.0, 7.5, 10.0],
+        'labels': ['Matig (<=6)', 'Voldoende (>6-7.5)', 'Uitstekend (>7.5)']
     },
     'heartrisk': {
-        'bins': [-0.1, 0.5, 1.5, 10.0],
-        'labels': ['Laag risico', 'Matig risico', 'Hoog risico']
+        'bins': [-0.1, 10.0, 20.0, 100.0],
+        'labels': ['Laag (<=10%)', 'Matig (>10-20%)', 'Hoog (>20%)']
     }
 }
 
@@ -4127,6 +4212,9 @@ def bereken_risico_migratie_value_binned(df_long: pd.DataFrame, slug: str, max_u
     Returns: (matrix_df, label_map) where matrix_df has columns Van(int), Na(int), Aantal
     and label_map maps integer codes to display labels.
     """
+    if slug in RISICO_MIGRATIE_EXCLUDED_SLUGS:
+        return pd.DataFrame(), {}
+
     if df_long is None or df_long.empty:
         return pd.DataFrame(), {}
 
@@ -4160,10 +4248,17 @@ def bereken_risico_migratie_value_binned(df_long: pd.DataFrame, slug: str, max_u
             df_pairs['Van_bin'] = pd.cut(df_pairs['Van_raw'], bins=bins_edges, include_lowest=True)
             df_pairs['Na_bin'] = pd.cut(df_pairs['Na_raw'], bins=bins_edges, include_lowest=True)
             categories = list(pd.Categorical(df_pairs['Van_bin']).categories)
-            cat_to_code = {cat: i for i, cat in enumerate(categories)}
-            df_pairs['Van'] = df_pairs['Van_bin'].map(cat_to_code)
-            df_pairs['Na'] = df_pairs['Na_bin'].map(cat_to_code)
-            label_map = {i: labels[i] if i < len(labels) else str(categories[i]) for i in range(len(categories))}
+            if slug == 'bmi':
+                bmi_codes = [-2, -1, 0, 1, 2]
+                cat_to_code = {cat: code for cat, code in zip(categories, bmi_codes[:len(categories)])}
+                df_pairs['Van'] = df_pairs['Van_bin'].map(cat_to_code)
+                df_pairs['Na'] = df_pairs['Na_bin'].map(cat_to_code)
+                label_map = {code: labels[i] if i < len(labels) else str(categories[i]) for i, code in enumerate(bmi_codes[:len(categories)])}
+            else:
+                cat_to_code = {cat: i for i, cat in enumerate(categories)}
+                df_pairs['Van'] = df_pairs['Van_bin'].map(cat_to_code)
+                df_pairs['Na'] = df_pairs['Na_bin'].map(cat_to_code)
+                label_map = {i: labels[i] if i < len(labels) else str(categories[i]) for i in range(len(categories))}
         except Exception:
             return pd.DataFrame(), {}
     else:
@@ -4197,7 +4292,7 @@ def bereken_risico_migratie_value_binned(df_long: pd.DataFrame, slug: str, max_u
     if df_pairs.empty:
         return pd.DataFrame(), {}
 
-    matrix = df_pairs.groupby(['Van', 'Na']).size().reset_index(name='Aantal')
+    matrix = df_pairs.groupby(['Van', 'Na'], observed=False).size().reset_index(name='Aantal')
     matrix['Van'] = matrix['Van'].astype(int)
     matrix['Na'] = matrix['Na'].astype(int)
     return matrix, label_map
@@ -4205,7 +4300,7 @@ def bereken_risico_migratie_value_binned(df_long: pd.DataFrame, slug: str, max_u
 def bereken_engagement_journey(
     base_pad: Path,
     db_url: str,
-    participant_ids: list | set | pd.Series | None = None,
+    participant_ids: ParticipantIds = None,
 ) -> pd.DataFrame:
     """Bereken aantallen en conversies in de gebruikersreis."""
     try:
@@ -4256,7 +4351,7 @@ def bereken_engagement_journey(
         ])
 
 
-def maak_engagement_funnel_plot(base_pad: Path, db_url: str, lang: str = 'nl', participant_ids: list | set | pd.Series | None = None) -> go.Figure:
+def maak_engagement_funnel_plot(base_pad: Path, db_url: str, lang: str = 'nl', participant_ids: ParticipantIds = None) -> go.Figure:
     """Visualiseert de funnel van registratie naar herhaalmeting."""
     try:
         journey = bereken_engagement_journey(base_pad, db_url, participant_ids)
@@ -4382,6 +4477,39 @@ def maak_invulfrequentie_vs_scores_plot(
     return fig_box, fig_bar, samenvatting[display_cols], df_plot
 
 
+def _maak_herhaalde_vragenlijst_traject_fig(traject: pd.DataFrame, q_naam: str, score_label: str, lang: str = 'nl') -> go.Figure:
+    """Visualiseer scoreverloop per invulmoment op numerieke x-as."""
+    if traject.empty:
+        return _empty_store_plot(tr("Geen trajectdata.", lang))
+
+    traject = traject.sort_values('invul_nr').copy()
+    fig = px.line(
+        traject,
+        x='invul_nr',
+        y='gem_score',
+        markers=True,
+        text='n_deelnemers',
+        title=tr('Scoreverloop per invulmoment: {naam}', lang).format(naam=q_naam),
+        labels={
+            'invul_nr': tr('Invulmoment', lang),
+            'gem_score': score_label,
+            'n_deelnemers': 'n',
+        },
+        color_discrete_sequence=[HOOFD_KLEUR],
+    )
+    fig.update_traces(
+        texttemplate='n=%{text}',
+        textposition='top center',
+    )
+    fig.update_xaxes(
+        tickmode='array',
+        tickvals=traject['invul_nr'].tolist(),
+        ticktext=[f"{int(v)}e invulling" for v in traject['invul_nr'].tolist()],
+    )
+    fig.update_layout(template='plotly_white', showlegend=False)
+    return fig
+
+
 def maak_herhaalde_vragenlijst_scoreverandering_plot(
     base_pad: Path,
     db_url: str,
@@ -4429,27 +4557,7 @@ def maak_herhaalde_vragenlijst_scoreverandering_plot(
     fig_verandering.add_hline(y=0, line_dash='dash', line_color='gray')
     fig_verandering.update_layout(template='plotly_white', showlegend=False)
 
-    fig_traject = _empty_store_plot(tr("Geen trajectdata.", lang))
-    if not traject.empty:
-        fig_traject = px.line(
-            traject,
-            x='invul_label',
-            y='gem_score',
-            markers=True,
-            text='n_deelnemers',
-            title=tr('Scoreverloop per invulmoment: {naam}', lang).format(naam=q_naam),
-            labels={
-                'invul_label': tr('Invulmoment', lang),
-                'gem_score': score_label,
-                'n_deelnemers': 'n',
-            },
-            color_discrete_sequence=[HOOFD_KLEUR],
-        )
-        fig_traject.update_traces(
-            texttemplate='n=%{text}',
-            textposition='top center',
-        )
-        fig_traject.update_layout(template='plotly_white')
+    fig_traject = _maak_herhaalde_vragenlijst_traject_fig(traject, q_naam, score_label, lang)
 
     return fig_verandering, fig_traject, samenvatting, traject, df_change, meta
 
@@ -4516,22 +4624,22 @@ def _laad_interaction_views(db_url: str | None = None) -> pd.DataFrame:
 
 
 def _laad_user_challenges_per_store(db_url: str | None = None) -> pd.DataFrame:
-    """Laad challenge-deelname per store (position-based kolommapping)."""
+    """Laad challenge-deelname per store met expliciete kolomnamen."""
     effective_db_url = db_url or DB_URL
     if not _has_valid_db_url(effective_db_url):
         return pd.DataFrame(columns=['store_id', 'user_ref', 'status', 'created_at'])
 
     try:
         engine = create_engine(effective_db_url)
-        df_raw = pd.read_sql("SELECT * FROM user_challenges", engine)
-        if df_raw.empty or len(df_raw.columns) < 5:
+        df = pd.read_sql(
+            "SELECT store_id, user_ref, challenge_id, status, created_at "
+            "FROM user_challenges",
+            engine,
+        )
+        required = {'store_id', 'user_ref', 'status', 'created_at'}
+        if df.empty or not required.issubset(df.columns):
             return pd.DataFrame(columns=['store_id', 'user_ref', 'status', 'created_at'])
 
-        df = df_raw.iloc[:, :9].copy()
-        df.columns = [
-            'id', 'user_ref', 'challenge_id', 'store_id', 'status',
-            'weeks_completed', 'challenge_type', 'created_at', 'updated_at',
-        ][:len(df.columns)]
         df['store_id'] = pd.to_numeric(df['store_id'], errors='coerce')
         df['user_ref'] = pd.to_numeric(df['user_ref'], errors='coerce')
         df['created_at'] = pd.to_datetime(df['created_at'], errors='coerce')
@@ -4548,6 +4656,29 @@ def _laad_user_challenges_per_store(db_url: str | None = None) -> pd.DataFrame:
 def _laad_participant_user_bridge(db_url: str | None = None) -> pd.DataFrame:
     """Koppel participant_id aan user_id via my_clic bridge."""
     effective_db_url = db_url or DB_URL
+    if DATA_SOURCE == 'csv':
+        participants = load_table_from_database('participants', effective_db_url)
+        my_clic = load_table_from_database('my_clic_participants', effective_db_url)
+        if not {'id', 'public_id'}.issubset(participants.columns) or not {
+            'qe_participant_id', 'user_id',
+        }.issubset(my_clic.columns):
+            logger.warning("CSV-tabellen bevatten geen bruikbare participant-user bridge.")
+            return pd.DataFrame(columns=['participant_id', 'user_id'])
+
+        bridge = participants[['id', 'public_id']].merge(
+            my_clic[['qe_participant_id', 'user_id']],
+            left_on='public_id',
+            right_on='qe_participant_id',
+            how='inner',
+        ).rename(columns={'id': 'participant_id'})
+        bridge['participant_id'] = pd.to_numeric(bridge['participant_id'], errors='coerce')
+        bridge['user_id'] = pd.to_numeric(bridge['user_id'], errors='coerce')
+        return (
+            bridge[['participant_id', 'user_id']]
+            .dropna(subset=['participant_id', 'user_id'])
+            .drop_duplicates('participant_id')
+        )
+
     if not _has_valid_db_url(effective_db_url):
         return pd.DataFrame(columns=['participant_id', 'user_id'])
 
@@ -4587,6 +4718,9 @@ def _laad_app_logins(db_url: str | None = None) -> pd.DataFrame:
     filter interne Smart Health-testaccounts eruit.
     """
     effective_db_url = db_url or DB_URL
+    if DATA_SOURCE == 'csv':
+        return pd.DataFrame(columns=['user_id', 'created_at'])
+
     if not _has_valid_db_url(effective_db_url):
         return pd.DataFrame(columns=['user_id', 'created_at'])
 
@@ -4613,9 +4747,10 @@ def _laad_app_logins(db_url: str | None = None) -> pd.DataFrame:
 def bereken_gebruiker_engagement_scores(
     base_pad: Path,
     db_url: str | None = None,
-    participant_ids: list | set | pd.Series | None = None,
+    participant_ids: ParticipantIds = None,
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
+    app_activity_reference_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """
     Bereken per deelnemer engagement-componenten (0–100) over koppelbare databronnen.
@@ -4677,10 +4812,10 @@ def bereken_gebruiker_engagement_scores(
         df['n_completions'] = 0
         df['n_vragenlijsten'] = 0
 
-    df['n_completions'] = pd.to_numeric(df.get('n_completions'), errors='coerce').fillna(0)
-    df['n_vragenlijsten'] = pd.to_numeric(df.get('n_vragenlijsten'), errors='coerce').fillna(0)
+    df['n_completions'] = _numeric_column(df, 'n_completions').fillna(0)
+    df['n_vragenlijsten'] = _numeric_column(df, 'n_vragenlijsten').fillna(0)
 
-    has_score = pd.to_numeric(df.get('rec_ls_lifestyle_score'), errors='coerce').notna()
+    has_score = _numeric_column(df, 'rec_ls_lifestyle_score').notna()
     df['score_vragenlijst'] = np.where(has_score, 100.0, np.where(df['n_completions'] > 0, 50.0, 0.0))
     df['score_herhaalmeting'] = np.where(df['n_completions'] >= 2, 100.0, 0.0)
     df['score_breedte'] = (df['n_vragenlijsten'].clip(0, 8) / 8.0 * 100.0).round(1)
@@ -4743,22 +4878,22 @@ def bereken_gebruiker_engagement_scores(
             .nunique()
             .reset_index(name='n_challenge_deelnemers')
         )
-        # Voltooiingsgraad: aandeel afgeronde van alle uitgekomen deelnames.
+        # Voltooiingsgraad: aandeel afgeronde van alle uitgekomen challenge-runs.
         # Uitgekomen = completed / expired / unsubscribed; signed_up, started en
         # disabled zijn nog lopend of administratief, dus niet meegenomen.
         uc_eind = uc[_status_lc.isin(['completed', 'expired', 'unsubscribed'])]
         term = (
             uc_eind.groupby('store_id')
             .agg(
-                n_challenge_terminal=('status', 'size'),
-                n_challenge_afgerond=('status',
+                n_challenge_runs=('status', 'size'),
+                n_challenge_runs_afgerond=('status',
                                       lambda s: int((s.astype(str).str.lower() == 'completed').sum())),
             )
             .reset_index()
         )
         term['pct_challenges_afgerond'] = np.where(
-            term['n_challenge_terminal'] > 0,
-            term['n_challenge_afgerond'] / term['n_challenge_terminal'] * 100,
+            term['n_challenge_runs'] > 0,
+            term['n_challenge_runs_afgerond'] / term['n_challenge_runs'] * 100,
             np.nan,
         )
         store_counts = df.groupby('store_id')['participant_id'].nunique().reset_index(name='n_store_users')
@@ -4777,13 +4912,15 @@ def bereken_gebruiker_engagement_scores(
         ).clip(0, 100)
         df = df.merge(
             challenge_per_store[['store_id', 'pct_challenge_store', 'n_challenge_deelnemers',
-                                 'pct_challenges_afgerond', 'n_challenge_afgerond']],
+                                 'pct_challenges_afgerond', 'n_challenge_runs',
+                                 'n_challenge_runs_afgerond']],
             on='store_id',
             how='left',
         )
         df['score_challenges'] = df['pct_challenge_store'].fillna(0.0)
     else:
-        for _c in ['pct_challenges_afgerond', 'n_challenge_afgerond']:
+        for _c in ['pct_challenges_afgerond', 'n_challenge_runs',
+                   'n_challenge_runs_afgerond']:
             df[_c] = np.nan
         df['score_challenges'] = 0.0
 
@@ -4804,10 +4941,14 @@ def bereken_gebruiker_engagement_scores(
     df['_f_app_actief'] = False
     if not logins.empty and 'user_id' in df.columns:
         _uids = pd.to_numeric(df['user_id'], errors='coerce')
-        _ref_datum = pd.to_datetime(logins['created_at'], errors='coerce').max()
+        _ref_datum = pd.Timestamp(app_activity_reference_date) if app_activity_reference_date is not None else (
+            pd.Timestamp(end_date) if end_date is not None else
+            pd.to_datetime(logins['created_at'], errors='coerce').max()
+        )
         _venster_start = _ref_datum - pd.Timedelta(days=90)
+        _login_dates = pd.to_datetime(logins['created_at'], errors='coerce')
         _recente_gebruikers = set(
-            pd.to_numeric(logins.loc[pd.to_datetime(logins['created_at'], errors='coerce') >= _venster_start,
+            pd.to_numeric(logins.loc[(_login_dates >= _venster_start) & (_login_dates <= _ref_datum),
                                      'user_id'], errors='coerce').dropna().astype(int)
         )
         df['_f_app_actief'] = _uids.notna() & _uids.isin(_recente_gebruikers)
@@ -4822,6 +4963,7 @@ def bereken_engagement_per_opdrachtgever(
     participant_ids: list | set | pd.Series | None = None,
     start_date: pd.Timestamp | None = None,
     end_date: pd.Timestamp | None = None,
+    app_activity_reference_date: pd.Timestamp | None = None,
 ) -> tuple[pd.DataFrame, float, pd.DataFrame]:
     """
     Aggregeer engagement naar opdrachtgever-niveau met gewogen samengestelde score.
@@ -4830,10 +4972,14 @@ def bereken_engagement_per_opdrachtgever(
     totaal_gewicht = sum(gewichten.values()) or 1.0
     gewichten = {k: v / totaal_gewicht for k, v in gewichten.items()}
 
-    score_args = {'participant_ids': participant_ids}
-    if start_date is not None or end_date is not None:
-        score_args.update(start_date=start_date, end_date=end_date)
-    df_users = bereken_gebruiker_engagement_scores(base_pad, db_url, **score_args)
+    df_users = bereken_gebruiker_engagement_scores(
+        base_pad,
+        db_url,
+        participant_ids=participant_ids,
+        start_date=start_date,
+        end_date=end_date,
+        app_activity_reference_date=app_activity_reference_date,
+    )
     if df_users.empty:
         return pd.DataFrame(), 0.0, pd.DataFrame()
 
@@ -4851,9 +4997,9 @@ def bereken_engagement_per_opdrachtgever(
             df_users[f'w_{key}'] = df_users[col] * gewichten.get(key, 0.0)
 
     # Fracties per persoon voor interpreteerbare percentages/aantallen in de uitsplitsing
-    _nc = pd.to_numeric(df_users.get('n_completions'), errors='coerce').fillna(0)
-    _sa = pd.to_numeric(df_users.get('score_artikelen'), errors='coerce').fillna(0)
-    _sk = pd.to_numeric(df_users.get('score_aankopen'), errors='coerce').fillna(0)
+    _nc = _numeric_column(df_users, 'n_completions').fillna(0)
+    _sa = _numeric_column(df_users, 'score_artikelen').fillna(0)
+    _sk = _numeric_column(df_users, 'score_aankopen').fillna(0)
     df_users['_f_vragenlijst'] = (_nc >= 1).astype(float)
     df_users['_f_herhaalmeting'] = (_nc >= 2).astype(float)
     df_users['_f_artikelen'] = (_sa > 0).astype(float)
@@ -4888,6 +5034,8 @@ def bereken_engagement_per_opdrachtgever(
         agg_spec['pct_challenges'] = ('score_challenges', 'mean')
     if 'n_challenge_deelnemers' in df_users.columns:
         agg_spec['n_challenges'] = ('n_challenge_deelnemers', 'max')
+    if 'n_challenge_runs' in df_users.columns:
+        agg_spec['n_challenge_runs'] = ('n_challenge_runs', 'max')
 
     # Informatieve maten buiten de compositie om (herhaalaankopen,
     # challenge-voltooiing en recente app-activiteit)
@@ -4897,8 +5045,8 @@ def bereken_engagement_per_opdrachtgever(
     agg_spec['n_app_actief'] = ('_f_app_actief', 'sum')
     if 'pct_challenges_afgerond' in df_users.columns:
         agg_spec['pct_challenges_afgerond'] = ('pct_challenges_afgerond', 'mean')
-    if 'n_challenge_afgerond' in df_users.columns:
-        agg_spec['n_challenges_afgerond'] = ('n_challenge_afgerond', 'max')
+    if 'n_challenge_runs_afgerond' in df_users.columns:
+        agg_spec['n_challenges_afgerond'] = ('n_challenge_runs_afgerond', 'max')
 
     agg = (
         df_users.groupby(['store_id', 'store_name'], as_index=False)
@@ -4917,13 +5065,18 @@ def bereken_engagement_per_opdrachtgever(
     for col in ['gem_invullingen', 'gem_artikelviews', 'gem_aankopen']:
         if col in agg.columns:
             agg[col] = pd.to_numeric(agg[col], errors='coerce').fillna(0).round(2)
-    for col in ['n_vragenlijst', 'n_herhaalmeting', 'n_artikelen', 'n_aankopen', 'n_challenges']:
+    for col in ['n_vragenlijst', 'n_herhaalmeting', 'n_artikelen', 'n_aankopen',
+                'n_challenges', 'n_challenge_runs']:
         if col in agg.columns:
             agg[col] = pd.to_numeric(agg[col], errors='coerce').fillna(0).astype(int)
     if 'n_app_actief' in agg.columns:
         agg['n_app_actief'] = pd.to_numeric(agg['n_app_actief'], errors='coerce').fillna(0).astype(int)
     if 'n_challenges_afgerond' in agg.columns:
         agg['n_challenges_afgerond'] = pd.to_numeric(agg['n_challenges_afgerond'], errors='coerce').fillna(0).astype(int)
+    for col in ['n_challenge_runs', 'n_challenge_runs_afgerond',
+                'n_challenges_afgerond']:
+        if col in agg.columns:
+            agg[col] = pd.to_numeric(agg[col], errors='coerce').fillna(0).astype(int)
     if {'_r_koper', '_r_herhaalkoper'} <= set(agg.columns):
         _denom = pd.to_numeric(agg['_r_koper'], errors='coerce').clip(lower=0)
         _numer = pd.to_numeric(agg['_r_herhaalkoper'], errors='coerce')
@@ -4997,6 +5150,51 @@ def controleer_gebruikers_koppeling(base_pad: Path, db_url: str | None = None) -
         _koppel_den = pd.to_numeric(koppeling['Beschikbaar'], errors='coerce').replace(0, np.nan)
         koppeling['Koppelingsgraad (%)'] = (_koppel_num / _koppel_den * 100).round(1)
     return koppeling
+
+
+def build_engagement_summary_stats(agg: pd.DataFrame, benchmark: float, lang: str = 'nl') -> dict:
+    """Bepaal de kerncijfers voor de engagement-ranglijst."""
+    if agg.empty:
+        return {
+            'beste_opdrachtgever': tr('N.v.t.', lang),
+            'beste_score': 0.0,
+            'benchmark': float(benchmark or 0.0),
+            'gemiddeld_score': 0.0,
+            'boven_benchmark': 0,
+            'top_delta': 0.0,
+            'laagste_score': 0.0,
+            'insight': tr('Geen engagementdata beschikbaar.', lang),
+        }
+
+    df = agg.copy()
+    df['engagement_score'] = pd.to_numeric(df['engagement_score'], errors='coerce').fillna(0)
+    top = df.sort_values('engagement_score', ascending=False).iloc[0]
+    lowest = df.sort_values('engagement_score', ascending=True).iloc[0]
+    avg_score = float(df['engagement_score'].mean())
+    top_delta = float(top['engagement_score']) - float(benchmark or 0.0)
+    boven_benchmark = int((df['engagement_score'] >= float(benchmark or 0.0)).sum())
+
+    if top_delta >= 0:
+        insight = tr(
+            'Beste opdrachtgever {store} scoort {score:.1f}, {delta:+.1f} boven de benchmark.',
+            lang,
+        ).format(store=top['store_name'], score=float(top['engagement_score']), delta=top_delta)
+    else:
+        insight = tr(
+            'Beste opdrachtgever {store} scoort {score:.1f}, {delta:+.1f} onder de benchmark.',
+            lang,
+        ).format(store=top['store_name'], score=float(top['engagement_score']), delta=top_delta)
+
+    return {
+        'beste_opdrachtgever': str(top['store_name']),
+        'beste_score': float(top['engagement_score']),
+        'benchmark': float(benchmark or 0.0),
+        'gemiddeld_score': avg_score,
+        'boven_benchmark': boven_benchmark,
+        'top_delta': top_delta,
+        'laagste_score': float(lowest['engagement_score']),
+        'insight': insight,
+    }
 
 
 def maak_engagement_opdrachtgever_ranking_plot(
@@ -5087,8 +5285,13 @@ def maak_engagement_breakdown_plot(agg: pd.DataFrame, store_name: str, lang: str
             if pct_col not in row.index or pd.isna(row[pct_col]):
                 continue
             waarde = float(row[pct_col])
-            if n_col is not None and n_col in row.index and pd.notna(row[n_col]) and n_deelnemers > 0:
-                hover = f"{float(row[n_col]):.0f}/{n_deelnemers} {tr('deelnemers', lang)} ({waarde:.1f}%)"
+            denominator = n_deelnemers
+            unit = tr('deelnemers', lang)
+            if pct_col == 'pct_challenges_afgerond':
+                denominator = float(row.get('n_challenge_runs', 0))
+                unit = tr('challenge-runs', lang)
+            if n_col is not None and n_col in row.index and pd.notna(row[n_col]) and denominator > 0:
+                hover = f"{float(row[n_col]):.0f}/{denominator:.0f} {unit} ({waarde:.1f}%)"
             else:
                 hover = f"{waarde:.1f}%"
             labels.append(label)
@@ -5111,8 +5314,11 @@ def maak_engagement_breakdown_plot(agg: pd.DataFrame, store_name: str, lang: str
             if item[0] in row.index and not pd.isna(row[item[0]])
         ]:
             waarde = float(row[pct_col])
-            if n_col is not None and n_col in row.index and pd.notna(row[n_col]):
-                balk_teksten.append(f'{waarde:.1f}% ({int(row[n_col])}/{n_deelnemers})')
+            denominator = n_deelnemers
+            if pct_col == 'pct_challenges_afgerond':
+                denominator = int(row.get('n_challenge_runs', 0))
+            if n_col is not None and n_col in row.index and pd.notna(row[n_col]) and denominator > 0:
+                balk_teksten.append(f'{waarde:.1f}% ({int(row[n_col])}/{denominator})')
             else:
                 balk_teksten.append(f'{waarde:.1f}%')
 
@@ -5250,11 +5456,20 @@ def bereken_engagement_trend(
         return trend
 
     trend = trend[trend['n_deelnemers'] >= max(1, min_deelnemers)]
+    trend['gewogen_engagement'] = trend['engagement_score'] * trend['n_deelnemers']
     benchmark_per_month = (
-        trend.groupby('jaar_maand')
-        .apply(lambda g: _weighted_average(g['engagement_score'], g['n_deelnemers']), include_groups=False)
-        .reset_index(name='benchmark')
+        trend.groupby('jaar_maand', as_index=False)
+        .agg(
+            gewogen_engagement=('gewogen_engagement', 'sum'),
+            n_deelnemers=('n_deelnemers', 'sum'),
+        )
     )
+    benchmark_per_month['benchmark'] = (
+        benchmark_per_month['gewogen_engagement']
+        / benchmark_per_month['n_deelnemers'].replace(0, np.nan)
+    )
+    benchmark_per_month = benchmark_per_month[['jaar_maand', 'benchmark']]
+    trend = trend.drop(columns='gewogen_engagement')
     trend = trend.merge(benchmark_per_month, on='jaar_maand', how='left')
     return trend
 
@@ -5577,7 +5792,7 @@ def _laad_analytics_data(db_url: str) -> pd.DataFrame:
         return pd.DataFrame()
 
 
-def bereken_kpi_metrics(df: pd.DataFrame, df_vorige: pd.DataFrame = None) -> dict:
+def bereken_kpi_metrics(df: pd.DataFrame, df_vorige: pd.DataFrame | None = None) -> dict:
     """
     Berekent KPI metrics uit analytics data.
     
@@ -5731,7 +5946,7 @@ def bereken_jaar_trends(df: pd.DataFrame, datum_kolom: str = 'created_at') -> pd
     return agg
 
 
-def maak_engagement_bar_chart(trends_df: pd.DataFrame, metrics: list = None,
+def maak_engagement_bar_chart(trends_df: pd.DataFrame, metrics: list[str] | None = None,
                                aggregatie: str = 'week') -> go.Figure:
     """
     Maakt een mixed chart voor user & engagement performance.
@@ -5780,7 +5995,7 @@ def maak_engagement_bar_chart(trends_df: pd.DataFrame, metrics: list = None,
     
     # Voeg total_users als bar toe (als beschikbaar)
     if 'total_users' in metrics:
-        waarden = trends_df['total_users'].values.astype(float)
+        waarden = np.asarray(trends_df['total_users'], dtype=float)
         if len(waarden) > 1 and waarden.max() > waarden.min():
             norm = (waarden - waarden.min()) / (waarden.max() - waarden.min())
         else:
@@ -5839,7 +6054,7 @@ def maak_engagement_bar_chart(trends_df: pd.DataFrame, metrics: list = None,
     # Bepaal y-axes configuratie
     yaxis1_title = 'Totaal gebruikers' if 'total_users' in metrics else (label_map.get(metrics[0], metrics[0]) if metrics else '')
     
-    layout_dict = dict(
+    layout_dict: dict[str, Any] = dict(
         title=dict(
             text=title_text,
             font=dict(size=16, color=LOOKER_KLEUREN['text']),
@@ -5868,7 +6083,7 @@ def maak_engagement_bar_chart(trends_df: pd.DataFrame, metrics: list = None,
     
     # Voeg secundaire y-as toe als er lijnen zijn
     if line_metrics:
-        line_labels = ', '.join([label_map.get(m, m) for m in line_metrics])
+        line_labels = ', '.join(str(label_map.get(m, m)) for m in line_metrics)
         layout_dict['yaxis2'] = dict(
             title=dict(text=line_labels, font=dict(color=LOOKER_KLEUREN.get(line_metrics[0], '#666666'))),
             tickfont=dict(color=LOOKER_KLEUREN.get(line_metrics[0], '#666666')),

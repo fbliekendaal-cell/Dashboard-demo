@@ -85,6 +85,7 @@ FACTOR_SLUGS = [
     (21, "work_life_balance", "Werk-Privé Balans"),
     (22, "burnout_risk", "Burn-out Risico"),
     (23, "vitality", "Vitaliteit"),
+    (24, "lifestyle", "Leefstijlscore"),
 ]
 
 QUESTIONNAIRES = [
@@ -130,6 +131,7 @@ FACTOR_TO_DASHBOARD_SLUG = {
     "work_life_balance": "rec_asr_work_ability_score",
     "burnout_risk": "rec_asr_burn_out_score",
     "vitality": "rec_asr_vitality_score",
+    "lifestyle": "rec_ls_lifestyle_score",
 }
 
 
@@ -185,12 +187,17 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
     content_data = []
     content_translation_data = []
     interactions_data = []
+    # Track (u_id, p_id, [completion_datetimes]) per user for purchase scheduling
+    user_completion_info = []
 
     start_date = datetime(2019, 1, 1)
 
     completion_id_counter = 1
     history_id_counter = 1
     completion_score_id_counter = 1
+    missing_lifestyle_score_ids = set(
+        random.Random(seed).sample(range(1, num_users + 1), k=num_users // 5)
+    )
 
     for u_id in range(1, num_users + 1):
         p_id = u_id
@@ -267,14 +274,14 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
         diabetes_cat = 2 if bmi >= 30 else (1 if bmi >= 25 else 0)
         blood_pressure_cat = 2 if heartrisk >= 15 else (1 if heartrisk >= 8 else 0)
 
-        # Generate multiple historical survey completions per participant over time.
-        # A repeated questionnaire per participant keeps repeat-change analyses non-empty.
         num_completions = random.choices([3, 4, 5, 6], weights=[0.25, 0.35, 0.25, 0.15])[0]
         primary_questionnaire_id = random.choice([q["id"] for q in QUESTIONNAIRES])
         comp_date = user_created
+        user_comp_dates = []  # collect all completion datetimes for this user
 
         for c_idx in range(num_completions):
             comp_date_str = comp_date.strftime("%Y-%m-%d %H:%M:%S")
+            user_comp_dates.append(comp_date)  # track for purchase scheduling
             c_id = completion_id_counter
             completion_id_counter += 1
             questionnaire_id = (
@@ -323,6 +330,7 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
                 21: wai,
                 22: burnout,
                 23: vitality,
+                24: c_lifestyle,
             }
 
             for f_id, f_val in factor_values.items():
@@ -370,6 +378,9 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
 
         latest_comp_str = comp_date_str
 
+        # Store (u_id, p_id, completion datetimes) for purchase scheduling
+        user_completion_info.append((u_id, p_id, user_comp_dates))
+
         # Participant row
         participants_data.append({
             "id": p_id,
@@ -400,7 +411,9 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
             "rec_med_bmi_cat": bmi_cat,
             "rec_heartrisk": heartrisk,
             "rec_heartrisk_cat": heartrisk_cat,
-            "rec_ls_lifestyle_score": lifestyle_score,
+            "rec_ls_lifestyle_score": (
+                None if u_id in missing_lifestyle_score_ids else lifestyle_score
+            ),
             "rec_ls_stress_sum": stress_sum,
             "rec_ls_stress_cat": stress_cat,
             "rec_ls_sleep_psqi_sum": psqi,
@@ -597,22 +610,72 @@ def generate_all(num_users: int = DEFAULT_NUM_USERS, seed: int = DEFAULT_SEED):
     pd.DataFrame(challenges_data).to_sql("user_challenges", conn, if_exists="replace", index=False)
 
     # 4. PRODUCTS & ORDERS
+    # ──────────────────────────────────────────────────────────────────────────
+    # Generate purchases spread realistically over time *after* a questionnaire
+    # completion, simulating that users buy coaching products as follow-up to
+    # their health check results.
+    #
+    # Design choices:
+    # - ~35 % of users buy at least one product.
+    # - Each buyer can place 1–3 separate orders (over multiple completions).
+    # - Each order date = a random completion date for that user + 7–90 days.
+    # - participant_id is stored on every order row so the SQLite fallback
+    #   in get_user_purchases() can link purchases without the CTE.
+    # ──────────────────────────────────────────────────────────────────────────
     df_products = pd.DataFrame(PRODUCTS)
     df_products.to_sql("products", conn, if_exists="replace", index=False)
 
+    PURCHASE_RATE = 0.35          # fraction of users who buy something
+    MAX_PURCHASES_PER_USER = 3    # maximum individual orders per user
+    MIN_DAYS_AFTER_COMPLETION = 7
+    MAX_DAYS_AFTER_COMPLETION = 90
+
     orders_data = []
     order_id = 1
-    for u_id in range(1, num_users + 1):
-        if random.random() < 0.35:  # 35% of users purchased something
+
+    # Product affinity: products are loosely linked to health dimensions.
+    # After a questionnaire, users with poor scores in certain areas are
+    # nudged toward the matching product (still probabilistic).
+    PRODUCT_IDS = [p["id"] for p in PRODUCTS]
+
+    # We need stress/bmi info per user — look it up from users_met_scores_data
+    user_stress = {row["user_id"]: row.get("rec_ls_stress_sum", 5.0) for row in users_met_scores_data}
+    user_bmi    = {row["user_id"]: row.get("rec_med_bmi", 25.0)      for row in users_met_scores_data}
+
+    for u_id, p_id, comp_dates in user_completion_info:
+        if not comp_dates:
+            continue
+
+        # Decide whether this user is a buyer
+        stress = user_stress.get(u_id, 5.0)
+        bmi    = user_bmi.get(u_id, 25.0)
+        # Users with higher stress or BMI are slightly more likely to buy
+        adjusted_rate = min(0.70, PURCHASE_RATE + (stress - 5.0) * 0.02 + (bmi - 25.0) * 0.005)
+        if random.random() >= adjusted_rate:
+            continue
+
+        # Decide how many purchases this user makes (1-3, weighted toward 1)
+        n_purchases = random.choices(
+            range(1, MAX_PURCHASES_PER_USER + 1),
+            weights=[0.60, 0.28, 0.12],
+        )[0]
+        # Each purchase is anchored to a (possibly different) completion date
+        anchors = random.choices(comp_dates, k=n_purchases)
+
+        for anchor in anchors:
+            days_after = random.randint(MIN_DAYS_AFTER_COMPLETION, MAX_DAYS_AFTER_COMPLETION)
+            order_date = anchor + timedelta(days=days_after)
             prod = random.choice(PRODUCTS)
             orders_data.append({
-                "id": order_id,
-                "user_id": u_id,
-                "product_id": prod["id"],
-                "status": "completed",
-                "created_at": (datetime(2022, 1, 1) + timedelta(days=random.randint(0, 1000))).strftime("%Y-%m-%d %H:%M:%S"),
+                "id":             order_id,
+                "user_id":        u_id,
+                "participant_id": p_id,   # enables SQLite path in get_user_purchases()
+                "product_id":     prod["id"],
+                "status":         "paid",
+                "created_at":     order_date.strftime("%Y-%m-%d %H:%M:%S"),
             })
             order_id += 1
+
     pd.DataFrame(orders_data).to_sql("orders", conn, if_exists="replace", index=False)
 
     # 5. STORE AVERAGE SCORES

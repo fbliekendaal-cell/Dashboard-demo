@@ -1,5 +1,7 @@
 # ── Centrale kleurendefinities ────────────────────────────────────────────────
 
+from categorieen import categorie_labels
+
 HOOFD_KLEUR = '#E87722'  # oranje
 
 # Geslacht: 0 = vrouw, 1 = man
@@ -25,8 +27,8 @@ VRAGENLIJST_COLORS = {
     2: '#E74C3C',  # rood = laag (<20%)
 }
 
-HEARTRISK_LABELS = {0: 'Laag', 1: 'Matig', 2: 'Hoog'}
-STRESS_LABELS    = {0: 'Laag', 1: 'Matig', 2: 'Hoog'}
+HEARTRISK_LABELS = categorie_labels('heartrisk')
+STRESS_LABELS    = categorie_labels('stress')
 
 # Leeftijd
 LEEFTIJD_LABELS = {0: 'Jong (<40)', 1: 'Middel (40-55)', 2: 'Ouder (>55)'}
@@ -36,20 +38,14 @@ LEEFTIJD_COLORS = {
     2: '#C0392B',  # rood
 }
 
-# BMI: -2 t/m 2, blauw voor ondergewicht, groen normaal, oranje/rood voor overgewicht
-BMI_LABELS = {
-    -2: 'Ernstig ondergewicht',
-    -1: 'Ondergewicht',
-     0: 'Normaal gewicht',
-     1: 'Overgewicht',
-     2: 'Obesitas',
-}
+# BMI: afwijkingen rood/oranje, normaal gewicht groen.
+BMI_LABELS = categorie_labels('bmi')
 BMI_COLORS = {
-    -2: '#1A5276',  # donkerblauw = ernstig ondergewicht
-    -1: '#85C1E9',  # lichtblauw = ondergewicht
+    -2: '#E74C3C',  # rood = ernstig ondergewicht
+    -1: '#E87722',  # oranje = ondergewicht
      0: '#2ECC71',  # groen = normaal
      1: '#E87722',  # oranje = overgewicht
-     2: '#922B21',  # donkerrood = obesitas
+     2: '#E74C3C',  # rood = obesitas
 }
 
 # Kaart stijl

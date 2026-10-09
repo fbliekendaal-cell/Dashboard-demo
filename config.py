@@ -39,6 +39,7 @@ else:
 
 DB_URL_POSTGRES = DB_URL
 DB_URL_SMART_HEALTH = DB_URL
+LOOKER_STUDIO_EMBED_URL = os.getenv('LOOKER_STUDIO_EMBED_URL') or ''
 
 # ──────────────────────────────────────────────────────────────────────────────
 # AUTHENTICATION / SECURITY
@@ -49,6 +50,7 @@ AUTH_CONFIG_FILE = Path(os.getenv('AUTH_CONFIG_FILE', CODE_DIR / 'auth_config.ya
 AUTH_COOKIE_KEY = os.getenv('AUTH_COOKIE_KEY', os.getenv('STREAMLIT_COOKIE_KEY', ""))
 AUTH_COOKIE_EXPIRY_DAYS = float(os.getenv('AUTH_COOKIE_EXPIRY_DAYS', "1"))
 AUTH_SESSION_TIMEOUT_MINUTES = int(os.getenv('AUTH_SESSION_TIMEOUT_MINUTES', "15"))
+AUTH_TRUST_DAYS = float(os.getenv('AUTH_TRUST_DAYS', "14"))
 AUTH_RATE_LIMIT_MAX_ATTEMPTS = int(os.getenv('AUTH_RATE_LIMIT_MAX_ATTEMPTS', "5"))
 AUTH_RATE_LIMIT_PERIOD_MINUTES = int(os.getenv('AUTH_RATE_LIMIT_PERIOD_MINUTES', "10"))
 

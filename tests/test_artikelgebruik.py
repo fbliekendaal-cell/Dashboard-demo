@@ -70,3 +70,28 @@ def test_artikel_overzicht_filtert_via_participant_id_bridge(monkeypatch, tmp_pa
     assert samenvatting["Totaal views"] == 1
     assert top_artikelen.iloc[0]["title"] == "Article A"
     assert top_artikelen.iloc[0]["Unieke_lezers"] == 1
+
+
+def test_participant_user_bridge_uses_csv_tables_in_demo_mode(monkeypatch):
+    participants = pd.DataFrame({
+        "id": [10, 20],
+        "public_id": ["participant-10", "participant-20"],
+    })
+    my_clic = pd.DataFrame({
+        "qe_participant_id": ["participant-10", "participant-20"],
+        "user_id": [100, 200],
+    })
+
+    monkeypatch.setattr(visualisaties, "DATA_SOURCE", "csv")
+    monkeypatch.setattr(
+        visualisaties,
+        "load_table_from_database",
+        lambda table, _db_url: participants if table == "participants" else my_clic,
+    )
+
+    bridge = visualisaties._laad_participant_user_bridge("sqlite://")
+
+    assert bridge.to_dict("records") == [
+        {"participant_id": 10, "user_id": 100},
+        {"participant_id": 20, "user_id": 200},
+    ]

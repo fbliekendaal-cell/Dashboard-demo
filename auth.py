@@ -1,13 +1,18 @@
 from __future__ import annotations
+import base64
+import hashlib
+import hmac
 import json
 import logging
 import os
+import secrets
 import time
 from datetime import datetime
 from pathlib import Path
 
 import pyotp
 import streamlit as st
+import streamlit.components.v1 as components
 import streamlit_authenticator as stauth
 import yaml
 
@@ -20,6 +25,7 @@ from config import (
     AUTH_RATE_LIMIT_MAX_ATTEMPTS,
     AUTH_RATE_LIMIT_PERIOD_MINUTES,
     AUTH_SESSION_TIMEOUT_MINUTES,
+    AUTH_TRUST_DAYS,
     setup_logger,
 )
 
@@ -35,6 +41,99 @@ if not auth_logger.handlers:
 
 def _env_flag(env_name: str) -> bool:
     return os.getenv(env_name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+# ── Vertrouwd-apparaat cookie ("onthoud 2FA") ─────────────────────────────────
+# Probleem: Streamlit start bij elke paginaherlading een nieuwe sessie, waardoor
+# auth_ok/auth_2fa_verified uit session_state verdwijnen en de gebruiker
+# wachtwoord + 2FA opnieuw moet invullen.
+# Oplossing: na succesvolle 2FA een HMAC-ondertekend cookie zetten. Bij een
+# nieuwe sessie herstelt require_login() de sessie vanuit dit cookie, tot
+# AUTH_TRUST_DAYS voorbij is (sliding renewal halverwege de periode).
+
+_TRUST_COOKIE_NAME = "sh_remember_2fa"
+_EPHEMERAL_SECRET: bytes | None = None
+
+
+def _trust_secret() -> bytes:
+    """Ondertekeningssleutel: expliciet geconfigureerde key, anders een per-proces willekeurige sleutel."""
+    global _EPHEMERAL_SECRET
+    key = (AUTH_COOKIE_KEY or "").strip()
+    if not key:
+        try:
+            key = str(load_auth_config().get("cookie", {}).get("key") or "").strip()
+        except Exception:
+            key = ""
+    if not key or key == "VERANDER_DIT_NAAR_EEN_LANG_WILLEKEURIG_GEHEIM":
+        # Geen echte key geconfigureerd: gebruik een willekeurig geheim dat
+        # per serverproces geldt (cookies overleven een herstart dan niet).
+        if _EPHEMERAL_SECRET is None:
+            _EPHEMERAL_SECRET = secrets.token_hex(32).encode()
+            auth_logger.warning(
+                "AUTH_COOKIE_KEY is niet (goed) geconfigureerd; vertrouwde "
+                "apparaten verliezen hun onthouden login bij een serverherstart."
+            )
+        return _EPHEMERAL_SECRET
+    return key.encode()
+
+
+def _maak_vertrouw_token(username: str) -> str:
+    nu = int(time.time())
+    exp = nu + int(AUTH_TRUST_DAYS * 86400)
+    payload = json.dumps({"u": username, "iat": nu, "exp": exp}, separators=(",", ":"))
+    b64 = base64.urlsafe_b64encode(payload.encode()).decode().rstrip("=")
+    sig = hmac.new(_trust_secret(), b64.encode(), hashlib.sha256).hexdigest()
+    return f"{b64}.{sig}"
+
+
+def _verifieer_vertrouw_token(token: str) -> str | None:
+    """Geef de username terug als het token geldig en niet verlopen is, anders None."""
+    try:
+        b64, sig = token.rsplit(".", 1)
+        verwacht = hmac.new(_trust_secret(), b64.encode(), hashlib.sha256).hexdigest()
+        if not hmac.compare_digest(sig, verwacht):
+            return None
+        padding = "=" * (-len(b64) % 4)
+        data = json.loads(base64.urlsafe_b64decode(b64 + padding))
+        if int(data.get("exp", 0)) < time.time():
+            return None
+        gebruiker = str(data.get("u", "")).strip()
+        return gebruiker or None
+    except Exception:
+        return None
+
+
+def _lees_cookie(naam: str) -> str | None:
+    try:
+        return st.context.cookies.get(naam)
+    except Exception:
+        return None
+
+
+def _zet_cookie(naam: str, waarde: str, max_age_s: int) -> None:
+    """
+    Zet (of wis met max_age_s=0) een browsercookie. Streamlit biedt geen
+    server-side cookie-API, dus dit loopt via een klein same-origin scriptje.
+    """
+    cookie_str = f"{naam}={waarde}; path=/; max-age={int(max_age_s)}; SameSite=Lax"
+    components.html(
+        "<script>document.cookie=" + json.dumps(cookie_str) + ";</script>",
+        height=0,
+    )
+
+
+def _verleng_vertrouw_cookie_indien_nodig(username: str) -> None:
+    """Sliding renewal: vernieuw zodra minder dan de helft van de periode resteert."""
+    try:
+        token = _lees_cookie(_TRUST_COOKIE_NAME) or ""
+        b64, _sig = token.rsplit(".", 1)
+        padding = "=" * (-len(b64) % 4)
+        data = json.loads(base64.urlsafe_b64decode(b64 + padding))
+        rest = int(data.get("exp", 0)) - time.time()
+        if rest < AUTH_TRUST_DAYS * 86400 / 2:
+            _zet_cookie(_TRUST_COOKIE_NAME, _maak_vertrouw_token(username), int(AUTH_TRUST_DAYS * 86400))
+    except Exception:
+        pass
 
 
 def _load_yaml_file(path: Path) -> dict:
@@ -54,8 +153,22 @@ def generate_bcrypt_password_hashes(passwords: list[str]) -> list[str]:
 
 
 def generate_totp_secret() -> str:
-    """Genereer een TOTP secret voor Google/Microsoft Authenticator."""
+    """Genereer een TOTP secret voor Google/Microsoft/Duo Authenticator."""
     return pyotp.random_base32()
+
+
+def geef_totp_provisioning_uri(username: str, issuer: str = "Smart Health Dashboard") -> str | None:
+    """
+    Geef de otpauth://-inschrijvingslink voor deze gebruiker. Handig om de
+    TOTP-secret in te voeren in een authenticator-app (Google, Microsoft,
+    Duo Mobile, 1Password, enz.) zonder typefouten.
+    Geeft None terug als de gebruiker geen TOTP-secret heeft.
+    """
+    user = _get_allowed_usernames(load_auth_config()).get(username, {})
+    secret = user.get("totp_secret")
+    if not secret or not isinstance(secret, str):
+        return None
+    return pyotp.TOTP(secret).provisioning_uri(name=username, issuer_name=issuer)
 
 
 def load_auth_config() -> dict:
@@ -64,14 +177,16 @@ def load_auth_config() -> dict:
 
     if not config:
         if not AUTH_CONFIG_FILE.exists():
-            auth_logger.info(
+            auth_logger.warning(
                 f"Authentication config ontbreekt: {AUTH_CONFIG_FILE}. "
-                "Standaard uitgeschakeld voor demo."
+                "Auth staat uit tenzij SMART_HEALTH_AUTH_ENABLED=true wordt gezet."
             )
         enabled = _env_flag(AUTH_ENABLED_ENV) if env_enabled_str is not None else False
         return {"enabled": enabled, "credentials": {"usernames": {}}}
 
     if env_enabled_str is not None:
+        # De omgevingsvariabele heeft voorrang op de YAML-configuratie,
+        # zodat auth per omgeving aan/uit kan zonder de YAML aan te passen.
         config["enabled"] = _env_flag(AUTH_ENABLED_ENV)
     elif "enabled" not in config:
         config["enabled"] = bool(config.get("credentials", {}).get("usernames"))
@@ -87,7 +202,16 @@ def _get_allowed_usernames(config: dict) -> dict:
 
 
 def is_admin() -> bool:
-    """Return whether the current demo user has administrator access."""
+    """
+    Geef True terug als de huidige gebruiker admin-rechten heeft.
+
+    Regels:
+    - Auth uitgeschakeld (locale/dev-omgeving): True, zodat ontwikkelaars
+      alle pagina's (o.a. de Testpagina) blijven zien.
+    - Ingelogde gebruiker met `role: admin` of `admin: true` in
+      auth_config.yaml: True.
+    - In alle andere gevallen: False (fail-closed).
+    """
     try:
         config = load_auth_config()
         if not config.get("enabled", False):
@@ -96,9 +220,14 @@ def is_admin() -> bool:
         if not username:
             return False
         user = _get_allowed_usernames(config).get(username, {}) or {}
-        return str(user.get("role", "")).strip().lower() == "admin" or bool(user.get("admin", False))
+        if str(user.get("role", "")).strip().lower() == "admin":
+            return True
+        return bool(user.get("admin", False))
     except Exception:
-        auth_logger.warning("is_admin(): fout bij bepalen van rol", exc_info=True)
+        auth_logger.warning(
+            "is_admin(): fout bij bepalen van rol; behandel als niet-admin.",
+            exc_info=True,
+        )
         return False
 
 
@@ -190,6 +319,8 @@ def logout() -> None:
     st.session_state["auth_pending_2fa"] = False
     st.session_state["auth_last_activity"] = None
     _clear_failed_attempts()
+    # Expliciet afmelden vergeet ook het vertrouwde apparaat.
+    _zet_cookie(_TRUST_COOKIE_NAME, "", 0)
 
     config = load_auth_config()
     try:
@@ -224,6 +355,9 @@ def _render_2fa_form(username: str) -> None:
             st.session_state["auth_last_activity"] = _current_timestamp()
             _clear_failed_attempts()
             _log_auth_event(username, "success", "2FA geverifieerd")
+            # Onthoud dit apparaat: herladen van het dashboard vereist geen
+            # nieuwe 2FA zolang het token geldig is (AUTH_TRUST_DAYS).
+            _zet_cookie(_TRUST_COOKIE_NAME, _maak_vertrouw_token(username), int(AUTH_TRUST_DAYS * 86400))
             st.success("2FA succesvol geverifieerd. Toegang verleend.")
         else:
             _record_failed_attempt(username)
@@ -252,6 +386,23 @@ def require_login() -> None:
             "Kopieer auth_config.example.yaml naar auth_config.yaml en voeg gebruikers toe met bcrypt-hashes."
         )
         st.stop()
+
+    # Herstel de sessie vanuit het vertrouwd-apparaat-cookie. Noodzakelijk
+    # omdat een paginaherlading (F5) de Streamlit-sessie en dus alle
+    # session_state wist; zonder dit cookie moet 2FA elke keer opnieuw.
+    if not (st.session_state.get("auth_ok") and st.session_state.get("auth_2fa_verified")):
+        _token = _lees_cookie(_TRUST_COOKIE_NAME)
+        if _token:
+            _herstelde_gebruiker = _verifieer_vertrouw_token(_token)
+            if _herstelde_gebruiker and _herstelde_gebruiker in usernames:
+                st.session_state["auth_ok"] = True
+                st.session_state["auth_user"] = _herstelde_gebruiker
+                st.session_state["auth_2fa_verified"] = True
+                st.session_state["auth_pending_2fa"] = False
+                st.session_state["auth_last_activity"] = _current_timestamp()
+                _log_auth_event(_herstelde_gebruiker, "success", "Sessie hersteld via vertrouwd apparaat")
+                _verleng_vertrouw_cookie_indien_nodig(_herstelde_gebruiker)
+                return
 
     if _session_expired():
         logout()
