@@ -121,10 +121,10 @@ dashboard-demo/
 ├── data_ingestion.py          # Data consolidatie & database ingesting
 ├── analyses.py                # Statistische analyses en longitudinale berekeningen
 ├── ML.py                      # Machine-learningmodellen
-├── variabelen.py               # Variabelenregister en categorieën
-├── categorieen.py              # Centrale categorie-definities
-├── kleuren.py                  # Centrale kleur- en labeldefinities
-├── kaarten.py                  # Genereert HTML-kaarten uit de ingestelde databron
+├── variabelen.py              # Variabelenregister en categorieën
+├── categorieen.py             # Centrale categorie-definities
+├── kleuren.py                 # Centrale kleur- en labeldefinities
+├── kaarten.py                 # Genereert HTML-kaarten uit de ingestelde databron
 ├── config.py                  # Centrale configuratie
 ├── export_synthetic_csv.py    # Export van synthetische data naar CSV
 ├── data/                      # CSV-tabellen voor de demo
